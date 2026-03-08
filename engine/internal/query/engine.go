@@ -1126,7 +1126,7 @@ func (e *Engine) resolveRelationsForRows(ctx context.Context, modelName string, 
 			continue // Skip unknown relations silently
 		}
 
-		if err := e.loadRelation(ctx, rows, relInfo, rel.nestedArgs); err != nil {
+		if err := e.loadRelation(ctx, modelName, rows, relInfo, rel.nestedArgs); err != nil {
 			return fmt.Errorf("error loading relation '%s': %w", rel.fieldName, err)
 		}
 	}
@@ -1220,6 +1220,7 @@ func (e *Engine) extractRelationsToLoad(modelName string, args map[string]interf
 //  5. Recursively resolve nested includes
 func (e *Engine) loadRelation(
 	ctx context.Context,
+	sourceModelName string,
 	parentRows []map[string]interface{},
 	relInfo *schema.RelationInfo,
 	nestedArgs map[string]interface{},
@@ -1230,9 +1231,9 @@ func (e *Engine) loadRelation(
 
 	switch relInfo.Direction {
 	case schema.RelationHasMany, schema.RelationHasOne:
-		return e.loadHasManyOrHasOne(ctx, parentRows, relInfo, nestedArgs)
+		return e.loadHasManyOrHasOne(ctx, sourceModelName, parentRows, relInfo, nestedArgs)
 	case schema.RelationBelongsTo:
-		return e.loadBelongsTo(ctx, parentRows, relInfo, nestedArgs)
+		return e.loadBelongsTo(ctx, sourceModelName, parentRows, relInfo, nestedArgs)
 	default:
 		return nil
 	}
@@ -1242,6 +1243,7 @@ func (e *Engine) loadRelation(
 // e.g., User.posts → Post table has author_id pointing to User.id
 func (e *Engine) loadHasManyOrHasOne(
 	ctx context.Context,
+	sourceModelName string,
 	parentRows []map[string]interface{},
 	relInfo *schema.RelationInfo,
 	nestedArgs map[string]interface{},
@@ -1252,7 +1254,7 @@ func (e *Engine) loadHasManyOrHasOne(
 	fkFieldName := relInfo.FKFields[0]
 
 	// Collect unique parent ref values (e.g., all user IDs)
-	parentIDs, refColName := e.collectParentValues(parentRows, refFieldName)
+	parentIDs, refColName := e.collectParentValues(sourceModelName, parentRows, refFieldName)
 	if len(parentIDs) == 0 {
 		// No parent IDs → set empty results
 		for _, row := range parentRows {
@@ -1324,6 +1326,7 @@ func (e *Engine) loadHasManyOrHasOne(
 // e.g., Post.author → Post has authorId, loading User by User.id
 func (e *Engine) loadBelongsTo(
 	ctx context.Context,
+	sourceModelName string,
 	parentRows []map[string]interface{},
 	relInfo *schema.RelationInfo,
 	nestedArgs map[string]interface{},
@@ -1334,7 +1337,7 @@ func (e *Engine) loadBelongsTo(
 	refFieldName := relInfo.RefFields[0]
 
 	// Collect unique FK values from parent rows (e.g., all authorId values)
-	fkValues, fkColName := e.collectParentValues(parentRows, fkFieldName)
+	fkValues, fkColName := e.collectParentValues(sourceModelName, parentRows, fkFieldName)
 	if len(fkValues) == 0 {
 		for _, row := range parentRows {
 			row[relInfo.FieldName] = nil
@@ -1396,9 +1399,13 @@ func (e *Engine) loadBelongsTo(
 // collectParentValues extracts unique values for a given field from parent rows.
 // It resolves the field name to the actual column name used in the query result.
 // Returns the unique values and the column name key used in the row maps.
-func (e *Engine) collectParentValues(parentRows []map[string]interface{}, fieldName string) ([]interface{}, string) {
-	// The row map keys are the SQL column names (snake_case, unquoted)
+func (e *Engine) collectParentValues(modelName string, parentRows []map[string]interface{}, fieldName string) ([]interface{}, string) {
 	colName := toSnakeCase(fieldName)
+	if model := e.builder.getModel(modelName); model != nil {
+		if field := model.GetFieldByName(fieldName); field != nil {
+			colName = e.builder.columnDBName(field)
+		}
+	}
 
 	seen := make(map[interface{}]bool)
 	var values []interface{}

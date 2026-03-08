@@ -8,7 +8,9 @@
   ],
   "scripts": {
     "build": "npm run build --workspaces --if-present",
-    "test": "npm run test --workspaces",
+    "test": "npm run test:packages && npm run test:engine",
+    "test:packages": "npm run test --workspaces --if-present",
+    "test:engine": "cd engine && go test ./...",
     "build:engine": "cd engine && go build -o ../bin/practor-engine ./cmd/practor"
   },
   "devDependencies": {

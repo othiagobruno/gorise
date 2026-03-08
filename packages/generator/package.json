@@ -11,7 +11,7 @@
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build",
-    "test": "jest"
+    "test": "npm run build && node --test ./test/generator.test.js"
   },
   "keywords": [
     "orm",

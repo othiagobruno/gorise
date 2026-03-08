@@ -51,7 +51,7 @@ func (b *Builder) resetParams() {
 
 // quote quotes an identifier.
 func (b *Builder) quote(name string) string {
-	return fmt.Sprintf(`"%s"`, name)
+	return fmt.Sprintf(`"%s"`, strings.ReplaceAll(name, `"`, `""`))
 }
 
 // toSnakeCase converts PascalCase/camelCase to snake_case for table/column names.
@@ -68,23 +68,53 @@ func toSnakeCase(s string) string {
 
 // tableName returns the table name for a model.
 func (b *Builder) tableName(model *schema.Model) string {
-	if model.DBName != "" {
-		return b.quote(model.DBName)
-	}
-	return b.quote(toSnakeCase(model.Name))
+	return b.quote(b.tableDBName(model))
 }
 
-// columnName returns the column name for a field.
-func (b *Builder) columnName(field *schema.Field) string {
-	// Check for @map attribute
+func (b *Builder) tableDBName(model *schema.Model) string {
+	if model.DBName != "" {
+		return model.DBName
+	}
+
+	return toSnakeCase(model.Name)
+}
+
+// columnDBName returns the database column name for a field.
+func (b *Builder) columnDBName(field *schema.Field) string {
 	for _, attr := range field.Attributes {
 		if attr.Name == "map" {
 			if name, ok := attr.Args["_0"].(string); ok {
-				return b.quote(name)
+				return name
 			}
 		}
 	}
-	return b.quote(toSnakeCase(field.Name))
+
+	return toSnakeCase(field.Name)
+}
+
+// columnName returns the quoted column name for a field.
+func (b *Builder) columnName(field *schema.Field) string {
+	return b.quote(b.columnDBName(field))
+}
+
+func (b *Builder) enumDBName(enum *schema.Enum) string {
+	if enum.DBName != "" {
+		return enum.DBName
+	}
+
+	return toSnakeCase(enum.Name)
+}
+
+func (b *Builder) enumValueDBName(value *schema.EnumValue) string {
+	if value.DBName != "" {
+		return value.DBName
+	}
+
+	return value.Name
+}
+
+func escapeStringLiteral(value string) string {
+	return strings.ReplaceAll(value, `'`, `''`)
 }
 
 // getModel finds a model by name in the schema.
@@ -95,6 +125,32 @@ func (b *Builder) getModel(name string) *schema.Model {
 		}
 	}
 	return nil
+}
+
+func (b *Builder) getEnum(name string) *schema.Enum {
+	for i := range b.schema.Enums {
+		if b.schema.Enums[i].Name == name {
+			return &b.schema.Enums[i]
+		}
+	}
+
+	return nil
+}
+
+func (b *Builder) resolveEnumValueDBName(enumName string, value interface{}) string {
+	enum := b.getEnum(enumName)
+	name := fmt.Sprintf("%v", value)
+	if enum == nil {
+		return name
+	}
+
+	for i := range enum.Values {
+		if enum.Values[i].Name == name {
+			return b.enumValueDBName(&enum.Values[i])
+		}
+	}
+
+	return name
 }
 
 // ============================================================================
@@ -1249,7 +1305,7 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 			case schema.DefaultValueLiteral:
 				switch v := field.DefaultValue.Value.(type) {
 				case string:
-					colDef += fmt.Sprintf(" DEFAULT '%s'", v)
+					colDef += fmt.Sprintf(" DEFAULT '%s'", escapeStringLiteral(v))
 				case bool:
 					colDef += fmt.Sprintf(" DEFAULT %t", v)
 				default:
@@ -1265,7 +1321,10 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 					// CUID generated in application layer
 				}
 			case schema.DefaultValueEnum:
-				colDef += fmt.Sprintf(" DEFAULT '%v'", field.DefaultValue.Value)
+				colDef += fmt.Sprintf(
+					" DEFAULT '%s'",
+					escapeStringLiteral(b.resolveEnumValueDBName(field.Type.Name, field.DefaultValue.Value)),
+				)
 			}
 		}
 
@@ -1284,6 +1343,10 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 
 		if fieldsArg, ok := relAttr.Args["fields"]; ok {
 			if refsArg, ok := relAttr.Args["references"]; ok {
+				targetModel := b.getModel(field.Type.Name)
+				if targetModel == nil {
+					continue
+				}
 				fkFields := toStringSlice(fieldsArg)
 				refFields := toStringSlice(refsArg)
 				if len(fkFields) > 0 && len(refFields) > 0 {
@@ -1295,12 +1358,18 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 						}
 					}
 					for _, r := range refFields {
-						refCols = append(refCols, b.quote(toSnakeCase(r)))
+						refField := targetModel.GetFieldByName(r)
+						if refField != nil {
+							refCols = append(refCols, b.columnName(refField))
+						}
+					}
+					if len(fkCols) == 0 || len(refCols) == 0 {
+						continue
 					}
 					constraints = append(constraints,
 						fmt.Sprintf("FOREIGN KEY (%s) REFERENCES %s (%s)",
 							strings.Join(fkCols, ", "),
-							b.quote(toSnakeCase(field.Type.Name)),
+							b.tableName(targetModel),
 							strings.Join(refCols, ", ")))
 				}
 			}
@@ -1318,11 +1387,10 @@ func (b *Builder) BuildCreateTable(model *schema.Model) string {
 func (b *Builder) BuildCreateEnum(enum *schema.Enum) string {
 	var values []string
 	for _, v := range enum.Values {
-		values = append(values, fmt.Sprintf("'%s'", v.Name))
+		values = append(values, fmt.Sprintf("'%s'", escapeStringLiteral(b.enumValueDBName(&v))))
 	}
-	name := toSnakeCase(enum.Name)
 	return fmt.Sprintf("DO $$ BEGIN\n  CREATE TYPE %s AS ENUM (%s);\nEXCEPTION\n  WHEN duplicate_object THEN null;\nEND $$",
-		b.quote(name), strings.Join(values, ", "))
+		b.quote(b.enumDBName(enum)), strings.Join(values, ", "))
 }
 
 // ============================================================================
