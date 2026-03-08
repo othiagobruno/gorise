@@ -33,6 +33,106 @@ interface QueryDescriptor {
   method: "query" | "mutation";
 }
 
+interface DelegateOperation {
+  methodName: string;
+  action: string;
+}
+
+const QUERY_ACTIONS = new Set([
+  "findMany",
+  "findUnique",
+  "findFirst",
+  "findUniqueOrThrow",
+  "findFirstOrThrow",
+  "count",
+  "aggregate",
+  "groupBy",
+  "findManyPaginated",
+  "findManyCursorPaginated",
+]);
+
+const DELEGATE_OPERATIONS: DelegateOperation[] = [
+  { methodName: "findMany", action: "findMany" },
+  { methodName: "findUnique", action: "findUnique" },
+  { methodName: "findFirst", action: "findFirst" },
+  { methodName: "findUniqueOrThrow", action: "findUniqueOrThrow" },
+  { methodName: "findFirstOrThrow", action: "findFirstOrThrow" },
+  { methodName: "create", action: "create" },
+  { methodName: "createMany", action: "createMany" },
+  { methodName: "update", action: "update" },
+  { methodName: "updateMany", action: "updateMany" },
+  { methodName: "delete", action: "delete" },
+  { methodName: "deleteMany", action: "deleteMany" },
+  { methodName: "upsert", action: "upsert" },
+  { methodName: "count", action: "count" },
+  { methodName: "aggregate", action: "aggregate" },
+  { methodName: "groupBy", action: "groupBy" },
+  { methodName: "paginate", action: "findManyPaginated" },
+  { methodName: "cursorPaginate", action: "findManyCursorPaginated" },
+];
+
+function isQueryAction(action: string): boolean {
+  return QUERY_ACTIONS.has(action);
+}
+
+function cloneArgs(args: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return structuredClone(args);
+  } catch {
+    return { ...args };
+  }
+}
+
+class PractorPromise<T> implements Promise<T> {
+  readonly [Symbol.toStringTag] = "Promise";
+
+  private promise: Promise<T> | null = null;
+
+  constructor(
+    private readonly executor: () => Promise<T>,
+    readonly descriptor?: QueryDescriptor,
+  ) {}
+
+  get started(): boolean {
+    return this.promise !== null;
+  }
+
+  private getOrCreatePromise(): Promise<T> {
+    if (this.promise === null) {
+      this.promise = this.executor();
+    }
+
+    return this.promise;
+  }
+
+  then<TResult1 = T, TResult2 = never>(
+    onfulfilled?:
+      | ((value: T) => TResult1 | PromiseLike<TResult1>)
+      | null,
+    onrejected?:
+      | ((reason: any) => TResult2 | PromiseLike<TResult2>)
+      | null,
+  ): Promise<TResult1 | TResult2> {
+    return this.getOrCreatePromise().then(onfulfilled, onrejected);
+  }
+
+  catch<TResult = never>(
+    onrejected?:
+      | ((reason: any) => TResult | PromiseLike<TResult>)
+      | null,
+  ): Promise<T | TResult> {
+    return this.getOrCreatePromise().catch(onrejected);
+  }
+
+  finally(onfinally?: (() => void) | null): Promise<T> {
+    return this.getOrCreatePromise().finally(onfinally ?? undefined);
+  }
+}
+
+function isPractorPromise(value: unknown): value is PractorPromise<unknown> {
+  return value instanceof PractorPromise;
+}
+
 /**
  * PractorClient is the main entry point for database operations.
  *
@@ -252,6 +352,10 @@ export class PractorClient {
     operations: Promise<unknown>[],
     options?: TransactionOptions,
   ): Promise<unknown[]> {
+    const descriptors = operations.map((operation, index) =>
+      this.getBatchDescriptor(operation, index),
+    );
+
     // Begin the transaction on the engine
     const beginResult = (await this.engine.request("transaction.begin", {
       isolationLevel: options?.isolationLevel ?? "",
@@ -261,9 +365,10 @@ export class PractorClient {
     const txId = beginResult.txId;
 
     try {
-      // Resolve all operations — they already executed against the main
-      // connection, so for true transactional batch we commit/rollback.
-      const results = await Promise.all(operations);
+      const results: unknown[] = [];
+      for (const descriptor of descriptors) {
+        results.push(await this.executeOperation(descriptor, txId));
+      }
 
       await this.engine.request("transaction.commit", { txId });
       return results;
@@ -313,115 +418,16 @@ export class PractorClient {
    * the engine's transaction.query / transaction.mutation methods.
    */
   private createTransactionProxy(txId: string): PractorClient {
-    const queryActions = [
-      "findMany",
-      "findUnique",
-      "findFirst",
-      "findUniqueOrThrow",
-      "findFirstOrThrow",
-      "findManyPaginated",
-    ];
-
     const proxy = Object.create(this) as PractorClient;
 
     for (const [camelName, _delegate] of this.modelDelegates) {
       const modelName = camelName.charAt(0).toUpperCase() + camelName.slice(1);
-
       const txDelegate: Record<string, Function> = {};
-
-      const allActions = [
-        "findMany",
-        "findUnique",
-        "findFirst",
-        "findUniqueOrThrow",
-        "findFirstOrThrow",
-        "create",
-        "createMany",
-        "update",
-        "updateMany",
-        "delete",
-        "deleteMany",
-        "upsert",
-        "count",
-        "aggregate",
-        "groupBy",
-      ];
-
-      for (const action of allActions) {
-        txDelegate[action] = async (args: Record<string, unknown> = {}) => {
-          const rpcMethod = queryActions.includes(action)
-            ? "transaction.query"
-            : "transaction.mutation";
-
-          // Route through middleware chain (tx-scoped)
-          const middlewareParams: MiddlewareParams = {
-            model: modelName,
-            action,
-            args,
-            method: queryActions.includes(action) ? "query" : "mutation",
-          };
-
-          return this.middlewareEngine.execute(
-            middlewareParams,
-            async (p: MiddlewareParams) => {
-              const txRpcMethod =
-                p.method === "query"
-                  ? "transaction.query"
-                  : "transaction.mutation";
-
-              const result = await this.engine.request(txRpcMethod, {
-                txId,
-                model: p.model,
-                action: p.action,
-                args: p.args,
-              });
-
-              const response = result as any;
-              return response?.data ?? response;
-            },
-          );
-        };
+      for (const operation of DELEGATE_OPERATIONS) {
+        txDelegate[operation.methodName] = (
+          args: Record<string, unknown> = {},
+        ) => this.createDelegateCall(modelName, operation, args, txId, false);
       }
-
-      // Add paginate to transaction proxy
-      txDelegate["paginate"] = async (args: Record<string, unknown> = {}) => {
-        const middlewareParams: MiddlewareParams = {
-          model: modelName,
-          action: "findManyPaginated",
-          args,
-          method: "query",
-        };
-
-        return this.middlewareEngine.execute(
-          middlewareParams,
-          async (p: MiddlewareParams) => {
-            const result = await this.engine.request("transaction.query", {
-              txId,
-              model: p.model,
-              action: p.action,
-              args: p.args,
-            });
-
-            const response = result as any;
-            return response?.data ?? response;
-          },
-        );
-      };
-
-      // Add cursorPaginate to transaction proxy
-      txDelegate["cursorPaginate"] = async (
-        args: Record<string, unknown> = {},
-      ): Promise<CursorPaginationResult> => {
-        const result = await this.engine.request("transaction.query", {
-          txId,
-          model: modelName,
-          action: "findManyCursorPaginated",
-          args,
-        });
-
-        const response = result as any;
-        return response?.data ?? response;
-      };
 
       (proxy as any)[camelName] = txDelegate;
     }
@@ -440,136 +446,98 @@ export class PractorClient {
    * middleware, and lazy query building.
    */
   private createModelDelegate(modelName: string): ModelDelegate {
-    const queryActions = [
-      "findMany",
-      "findUnique",
-      "findFirst",
-      "findUniqueOrThrow",
-      "findFirstOrThrow",
-    ];
-    const mutationActions = [
-      "create",
-      "createMany",
-      "update",
-      "updateMany",
-      "delete",
-      "deleteMany",
-      "upsert",
-    ];
-    const aggregateActions = ["count", "aggregate", "groupBy"];
-    const allActions = [
-      ...queryActions,
-      ...mutationActions,
-      ...aggregateActions,
-    ];
-
     const delegate: Record<string, Function> = {};
 
-    for (const action of allActions) {
-      delegate[action] = async (args: Record<string, unknown> = {}) => {
-        this.ensureConnected();
+    for (const operation of DELEGATE_OPERATIONS) {
+      delegate[operation.methodName] = (
+        args: Record<string, unknown> = {},
+      ) => this.createDelegateCall(modelName, operation, args);
+    }
 
-        const method = queryActions.includes(action) ? "query" : "mutation";
+    return delegate as unknown as ModelDelegate;
+  }
 
-        if (this.options.log?.includes("query")) {
-          console.log(
-            `[Practor Query] ${modelName}.${action}`,
-            JSON.stringify(args, null, 2),
-          );
-        }
+  private createDelegateCall<T>(
+    modelName: string,
+    operation: DelegateOperation,
+    args: Record<string, unknown>,
+    txId?: string,
+    captureDescriptor = true,
+  ): Promise<T> {
+    const descriptor: QueryDescriptor = {
+      model: modelName,
+      action: operation.action,
+      args,
+      method: isQueryAction(operation.action) ? "query" : "mutation",
+    };
 
-        // Route through middleware chain
-        const middlewareParams: MiddlewareParams = {
-          model: modelName,
-          action,
-          args,
-          method,
-        };
+    return new PractorPromise(async () => {
+      this.ensureConnected();
 
-        return this.middlewareEngine.execute(
-          middlewareParams,
-          async (p: MiddlewareParams) => {
-            const result = await this.engine.request(p.method, {
+      if (this.options.log?.includes("query")) {
+        console.log(
+          `[Practor Query] ${modelName}.${operation.methodName}`,
+          JSON.stringify(args, null, 2),
+        );
+      }
+
+      return this.executeOperation<T>(descriptor, txId);
+    }, captureDescriptor ? descriptor : undefined) as Promise<T>;
+  }
+
+  private async executeOperation<T>(
+    params: QueryDescriptor,
+    txId?: string,
+  ): Promise<T> {
+    return (await this.middlewareEngine.execute(
+      params,
+      async (p: MiddlewareParams) => {
+        const rpcMethod = txId
+          ? p.method === "query"
+            ? "transaction.query"
+            : "transaction.mutation"
+          : p.method;
+        const rpcParams = txId
+          ? {
+              txId,
               model: p.model,
               action: p.action,
               args: p.args,
-            });
-            const response = result as any;
-            return response?.data ?? response;
-          },
-        );
-      };
+            }
+          : {
+              model: p.model,
+              action: p.action,
+              args: p.args,
+            };
+        const result = await this.engine.request(rpcMethod, rpcParams);
+        const response = result as any;
+        return response?.data ?? response;
+      },
+    )) as T;
+  }
+
+  private getBatchDescriptor(
+    operation: Promise<unknown>,
+    index: number,
+  ): QueryDescriptor {
+    if (!isPractorPromise(operation) || !operation.descriptor) {
+      throw new PractorError(
+        `Batch transaction operation at index ${index} is not a direct Practor query. Pass delegate calls to $transaction([...]) without awaiting them first.`,
+        -1,
+      );
     }
 
-    // Paginate convenience method
-    delegate["paginate"] = async (
-      args: Record<string, unknown> = {},
-    ): Promise<PaginationResult> => {
-      this.ensureConnected();
+    if (operation.started) {
+      throw new PractorError(
+        `Batch transaction operation at index ${index} was already started. Pass untouched Practor query objects to $transaction([...]).`,
+        -1,
+      );
+    }
 
-      if (this.options.log?.includes("query")) {
-        console.log(
-          `[Practor Query] ${modelName}.paginate`,
-          JSON.stringify(args, null, 2),
-        );
-      }
-
-      const middlewareParams: MiddlewareParams = {
-        model: modelName,
-        action: "findManyPaginated",
-        args,
-        method: "query",
-      };
-
-      return this.middlewareEngine.execute(
-        middlewareParams,
-        async (p: MiddlewareParams) => {
-          const result = await this.engine.request("query", {
-            model: p.model,
-            action: p.action,
-            args: p.args,
-          });
-          const response = result as any;
-          return response?.data ?? response;
-        },
-      ) as Promise<PaginationResult>;
+    return {
+      ...operation.descriptor,
+      args: cloneArgs(operation.descriptor.args),
     };
-
-    // Cursor-based pagination convenience method
-    delegate["cursorPaginate"] = async (
-      args: Record<string, unknown> = {},
-    ): Promise<CursorPaginationResult> => {
-      this.ensureConnected();
-
-      if (this.options.log?.includes("query")) {
-        console.log(
-          `[Practor Query] ${modelName}.cursorPaginate`,
-          JSON.stringify(args, null, 2),
-        );
-      }
-
-      const middlewareParams: MiddlewareParams = {
-        model: modelName,
-        action: "findManyCursorPaginated",
-        args,
-        method: "query",
-      };
-
-      return this.middlewareEngine.execute(
-        middlewareParams,
-        async (p: MiddlewareParams) => {
-          const result = await this.engine.request("query", {
-            model: p.model,
-            action: p.action,
-            args: p.args,
-          });
-          const response = result as any;
-          return response?.data ?? response;
-        },
-      ) as Promise<CursorPaginationResult>;
-    };
-
-    return delegate as unknown as ModelDelegate;
   }
 
   // ============================================================================

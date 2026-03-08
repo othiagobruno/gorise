@@ -552,6 +552,14 @@ func (e *Engine) executeWithTx(ctx context.Context, tx *sql.Tx, model string, ac
 		return e.txUpsert(ctx, tx, model, args)
 	case "count":
 		return e.txCount(ctx, tx, model, args)
+	case "aggregate":
+		return e.txAggregate(ctx, tx, model, args)
+	case "groupBy":
+		return e.txGroupBy(ctx, tx, model, args)
+	case "findManyPaginated":
+		return e.txFindManyPaginated(ctx, tx, model, args)
+	case "findManyCursorPaginated":
+		return e.txFindManyCursorPaginated(ctx, tx, model, args)
 	default:
 		return nil, fmt.Errorf("unsupported action '%s' inside transaction", action)
 	}
@@ -708,6 +716,183 @@ func (e *Engine) txCount(ctx context.Context, tx *sql.Tx, model string, args map
 		return nil, fmt.Errorf("count error: %w", err)
 	}
 	return count, nil
+}
+
+func (e *Engine) txAggregate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildAggregate(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, nil
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txGroupBy(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildGroupBy(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("groupBy error: %w", err)
+	}
+
+	return result.Rows, nil
+}
+
+func (e *Engine) txFindManyPaginated(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	page := 1
+	limit := 10
+
+	if p, ok := args["page"]; ok {
+		if pf, ok := p.(float64); ok {
+			page = int(pf)
+		}
+	}
+	if l, ok := args["limit"]; ok {
+		if lf, ok := l.(float64); ok {
+			limit = int(lf)
+		}
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
+
+	countArgs := make(map[string]interface{})
+	if where, ok := args["where"]; ok {
+		countArgs["where"] = where
+	}
+
+	totalResult, err := e.txCount(ctx, tx, model, countArgs)
+	if err != nil {
+		return nil, fmt.Errorf("pagination count error: %w", err)
+	}
+	total, _ := totalResult.(int64)
+
+	findArgs := make(map[string]interface{})
+	for k, v := range args {
+		if k != "page" && k != "limit" {
+			findArgs[k] = v
+		}
+	}
+	findArgs["take"] = float64(limit)
+	findArgs["skip"] = float64((page - 1) * limit)
+
+	data, err := e.txFindMany(ctx, tx, model, findArgs)
+	if err != nil {
+		return nil, fmt.Errorf("pagination query error: %w", err)
+	}
+
+	totalPages := int(math.Ceil(float64(total) / float64(limit)))
+	hasNext := page < totalPages
+
+	return map[string]interface{}{
+		"data":     data,
+		"page":     page,
+		"limit":    limit,
+		"has_next": hasNext,
+		"total":    total,
+	}, nil
+}
+
+func (e *Engine) txFindManyCursorPaginated(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	take := 10
+	if t, ok := args["take"]; ok {
+		if tf, ok := t.(float64); ok {
+			take = int(tf)
+		}
+	}
+	if take < 1 {
+		take = 10
+	}
+
+	cursorField := ""
+	if cursor, ok := args["cursor"].(map[string]interface{}); ok {
+		for k := range cursor {
+			cursorField = k
+			break
+		}
+	}
+
+	if cursorField == "" {
+		if orderBy, ok := args["orderBy"]; ok {
+			switch ob := orderBy.(type) {
+			case map[string]interface{}:
+				for k := range ob {
+					cursorField = k
+					break
+				}
+			case []interface{}:
+				if len(ob) > 0 {
+					if first, ok := ob[0].(map[string]interface{}); ok {
+						for k := range first {
+							cursorField = k
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if cursorField == "" {
+		cursorField = "id"
+	}
+
+	buildArgs := make(map[string]interface{})
+	for k, v := range args {
+		buildArgs[k] = v
+	}
+	buildArgs["take"] = float64(take + 1)
+
+	q, err := e.builder.BuildFindManyCursorPaginated(model, buildArgs)
+	if err != nil {
+		return nil, fmt.Errorf("cursor pagination build error: %w", err)
+	}
+
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("cursor pagination query error: %w", err)
+	}
+
+	allRows := result.Rows
+	hasNextPage := len(allRows) > take
+	if hasNextPage {
+		allRows = allRows[:take]
+	}
+
+	var nextCursor interface{}
+	if hasNextPage && len(allRows) > 0 {
+		lastRow := allRows[len(allRows)-1]
+		nextCursor = lastRow[cursorField]
+		if nextCursor == nil {
+			nextCursor = lastRow[toSnakeCase(cursorField)]
+		}
+	}
+
+	data := make([]interface{}, len(allRows))
+	for i, row := range allRows {
+		data[i] = row
+	}
+
+	return map[string]interface{}{
+		"data":        data,
+		"nextCursor":  nextCursor,
+		"hasNextPage": hasNextPage,
+	}, nil
 }
 
 // ============================================================================
