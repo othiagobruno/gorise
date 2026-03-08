@@ -4,6 +4,7 @@
 
 export { PractorClient } from "./runtime/client";
 export { PractorEngine, PractorError } from "./runtime/engine";
+export { Sql, sql, type SafeSqlQuery } from "./runtime/sql";
 export {
   MiddlewareEngine,
   type MiddlewareParams,

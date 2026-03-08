@@ -272,12 +272,26 @@ const page2 = await practor.user.cursorPaginate({
 ### Raw SQL
 
 ```typescript
+import { PractorClient, sql } from "@practor/client";
+
 // Query raw (returns rows)
 const users = await practor.$queryRaw`SELECT * FROM "user" WHERE id = ${1}`;
 
 // Execute raw (returns affected row count)
 const count =
   await practor.$executeRaw`DELETE FROM "user" WHERE active = ${false}`;
+
+// Reusable safe SQL fragments
+const onlyActive = sql`WHERE active = ${true}`;
+const activeUsers = await practor.$queryRaw(
+  sql`SELECT * FROM "user" ${onlyActive} ORDER BY id DESC`,
+);
+
+// Explicitly unsafe string SQL
+const rows = await practor.$queryRawUnsafe(
+  'SELECT * FROM "user" WHERE email = $1',
+  userEmail,
+);
 ```
 
 ### Middleware / Hooks (`$use`)

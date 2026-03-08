@@ -50,7 +50,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.writeResponse(&Response{
 		JSONRPC: "2.0",
 		ID:      0,
-		Result:  map[string]string{"status": "ready", "version": "0.1.0"},
+		Result:  map[string]string{"status": "ready", "version": "0.3.0"},
 	})
 
 	for {

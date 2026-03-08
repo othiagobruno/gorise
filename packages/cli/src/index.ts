@@ -20,7 +20,7 @@ import { execFileSync, execSync } from "child_process";
 // CLI Entry
 // ============================================================================
 
-const VERSION = "0.1.0";
+const VERSION = "0.3.0";
 const SCHEMA_FILE = "schema.practor";
 
 /** Resolves the Go engine binary path. */

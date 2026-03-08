@@ -15,7 +15,7 @@ import (
 )
 
 // Version is set at build time.
-var Version = "0.1.0"
+var Version = "0.3.0"
 
 func main() {
 	if len(os.Args) > 1 {

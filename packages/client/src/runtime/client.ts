@@ -11,6 +11,11 @@ import {
   type MiddlewareFunction,
   type MiddlewareParams,
 } from "./middleware";
+import {
+  compileSafeSql,
+  isSql,
+  type Sql,
+} from "./sql";
 import type {
   PractorClientOptions,
   ModelDelegate,
@@ -274,14 +279,44 @@ export class PractorClient {
    * ```
    */
   async $executeRaw(
-    query: string | TemplateStringsArray,
+    query: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<number>;
+  async $executeRaw(query: Sql): Promise<number>;
+  async $executeRaw(
+    query: string | TemplateStringsArray | Sql,
     ...values: unknown[]
   ): Promise<number> {
     this.ensureConnected();
-    const { sql, args } = this.processRawQuery(query, values);
+    if (typeof query === "string") {
+      throw new PractorError(
+        "Pass a tagged template to $executeRaw or use $executeRawUnsafe() for explicit string SQL.",
+        -1,
+      );
+    }
+
+    const { sql, args } = this.processSafeRawQuery(query, values);
     const result = (await this.engine.request("db.executeRaw", {
       query: sql,
       args,
+    })) as any;
+    return result.count ?? 0;
+  }
+
+  /**
+   * Executes a raw SQL command from an explicit string.
+   *
+   * Why? This keeps string SQL available for advanced cases while making
+   * the unsafe path obvious at the call site.
+   */
+  async $executeRawUnsafe(
+    query: string,
+    ...values: unknown[]
+  ): Promise<number> {
+    this.ensureConnected();
+    const result = (await this.engine.request("db.executeRaw", {
+      query,
+      args: values,
     })) as any;
     return result.count ?? 0;
   }
@@ -295,14 +330,41 @@ export class PractorClient {
    * ```
    */
   async $queryRaw<T = unknown>(
-    query: string | TemplateStringsArray,
+    query: TemplateStringsArray,
+    ...values: unknown[]
+  ): Promise<T[]>;
+  async $queryRaw<T = unknown>(query: Sql): Promise<T[]>;
+  async $queryRaw<T = unknown>(
+    query: string | TemplateStringsArray | Sql,
     ...values: unknown[]
   ): Promise<T[]> {
     this.ensureConnected();
-    const { sql, args } = this.processRawQuery(query, values);
+    if (typeof query === "string") {
+      throw new PractorError(
+        "Pass a tagged template to $queryRaw or use $queryRawUnsafe() for explicit string SQL.",
+        -1,
+      );
+    }
+
+    const { sql, args } = this.processSafeRawQuery(query, values);
     const result = await this.engine.request("db.queryRaw", {
       query: sql,
       args,
+    });
+    return (result as T[]) ?? [];
+  }
+
+  /**
+   * Executes a raw SQL query from an explicit string and returns rows.
+   */
+  async $queryRawUnsafe<T = unknown>(
+    query: string,
+    ...values: unknown[]
+  ): Promise<T[]> {
+    this.ensureConnected();
+    const result = await this.engine.request("db.queryRaw", {
+      query,
+      args: values,
     });
     return (result as T[]) ?? [];
   }
@@ -554,33 +616,18 @@ export class PractorClient {
     }
   }
 
-  /**
-   * Processes raw SQL queries. Supports tagged template literals.
-   *
-   * Why? Tagged templates provide SQL injection safety by parameterizing values.
-   */
-  private processRawQuery(
-    query: string | TemplateStringsArray,
+  /** Compiles a safe raw SQL query into positional PostgreSQL parameters. */
+  private processSafeRawQuery(
+    query: TemplateStringsArray | Sql,
     values: unknown[],
   ): { sql: string; args: unknown[] } {
-    if (typeof query === "string") {
-      return { sql: query, args: values };
+    if (isSql(query) && values.length > 0) {
+      throw new PractorError(
+        "Do not pass extra values when using a prebuilt sql(...) query.",
+        -1,
+      );
     }
 
-    // Tagged template literal: SELECT * FROM users WHERE id = ${id}
-    let sql = "";
-    const args: unknown[] = [];
-    let paramIndex = 0;
-
-    for (let i = 0; i < query.length; i++) {
-      sql += query[i];
-      if (i < values.length) {
-        paramIndex++;
-        sql += `$${paramIndex}`;
-        args.push(values[i]);
-      }
-    }
-
-    return { sql, args };
+    return compileSafeSql(query, values);
   }
 }
