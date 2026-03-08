@@ -1,0 +1,51 @@
+{
+  "name": "@practor/cli",
+  "version": "0.1.0",
+  "description": "Practor ORM CLI — Schema management, generation, and migrations",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "practor": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "jest"
+  },
+  "keywords": [
+    "orm",
+    "cli",
+    "database",
+    "migration",
+    "schema",
+    "prisma",
+    "practor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/othiagobruno/practor",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/othiagobruno/practor#readme",
+  "bugs": {
+    "url": "https://github.com/othiagobruno/practor/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@practor/generator": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,15 @@
+{
+  "name": "practor",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "build:engine": "cd engine && go build -o ../bin/practor-engine ./cmd/practor"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  }
+}

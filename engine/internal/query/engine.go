@@ -1,0 +1,747 @@
+package query
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"math"
+	"sync"
+
+	"github.com/google/uuid"
+	"github.com/practor/practor-engine/internal/connector"
+	"github.com/practor/practor-engine/internal/schema"
+)
+
+// ============================================================================
+// Query Engine — Central dispatcher for all query operations
+// ============================================================================
+
+// Engine is the central query engine that processes requests.
+type Engine struct {
+	connector connector.Connector
+	schema    *schema.Schema
+	builder   *Builder
+	txStore   map[string]*sql.Tx
+	txMu      sync.RWMutex
+}
+
+// NewEngine creates a new query Engine.
+func NewEngine(conn connector.Connector, s *schema.Schema) *Engine {
+	dialect := string(conn.GetDialect())
+	return &Engine{
+		connector: conn,
+		schema:    s,
+		builder:   NewBuilder(dialect, s),
+		txStore:   make(map[string]*sql.Tx),
+	}
+}
+
+// Execute processes a query request and returns the result.
+func (e *Engine) Execute(ctx context.Context, model string, action string, args map[string]interface{}) (interface{}, error) {
+	switch action {
+	case "findMany":
+		return e.executeFindMany(ctx, model, args)
+	case "findUnique":
+		return e.executeFindUnique(ctx, model, args)
+	case "findFirst":
+		return e.executeFindFirst(ctx, model, args)
+	case "findUniqueOrThrow":
+		return e.executeFindUniqueOrThrow(ctx, model, args)
+	case "findFirstOrThrow":
+		return e.executeFindFirstOrThrow(ctx, model, args)
+	case "create":
+		return e.executeCreate(ctx, model, args)
+	case "createMany":
+		return e.executeCreateMany(ctx, model, args)
+	case "update":
+		return e.executeUpdate(ctx, model, args)
+	case "updateMany":
+		return e.executeUpdateMany(ctx, model, args)
+	case "delete":
+		return e.executeDelete(ctx, model, args)
+	case "deleteMany":
+		return e.executeDeleteMany(ctx, model, args)
+	case "upsert":
+		return e.executeUpsert(ctx, model, args)
+	case "count":
+		return e.executeCount(ctx, model, args)
+	case "aggregate":
+		return e.executeAggregate(ctx, model, args)
+	case "groupBy":
+		return e.executeGroupBy(ctx, model, args)
+	case "findManyPaginated":
+		return e.executeFindManyPaginated(ctx, model, args)
+	default:
+		return nil, fmt.Errorf("unknown action '%s'", action)
+	}
+}
+
+// ============================================================================
+// Query execution methods
+// ============================================================================
+
+func (e *Engine) executeFindMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildFindMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	return result.Rows, nil
+}
+
+func (e *Engine) executeFindUnique(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildFindUnique(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, nil // Return null if not found
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeFindFirst(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	return e.executeFindUnique(ctx, model, args)
+}
+
+func (e *Engine) executeFindUniqueOrThrow(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	result, err := e.executeFindUnique(ctx, model, args)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("record not found in model '%s'", model)
+	}
+	return result, nil
+}
+
+func (e *Engine) executeFindFirstOrThrow(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	return e.executeFindUniqueOrThrow(ctx, model, args)
+}
+
+func (e *Engine) executeCreate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCreate(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("create error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("create returned no data")
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeCreateMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCreateMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if q.SQL == "" {
+		return map[string]interface{}{"count": 0}, nil
+	}
+
+	result, err := e.connector.Execute(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("createMany error: %w", err)
+	}
+
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) executeUpdate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpdate(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("update error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("record not found for update in model '%s'", model)
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeUpdateMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpdateMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := e.connector.Execute(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("updateMany error: %w", err)
+	}
+
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) executeDelete(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildDelete(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("delete error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("record not found for delete in model '%s'", model)
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeDeleteMany(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildDeleteMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	result, err := e.connector.Execute(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("deleteMany error: %w", err)
+	}
+
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) executeUpsert(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpsert(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("upsert error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("upsert returned no data")
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeCount(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCount(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	row := e.connector.QueryRow(ctx, q.SQL, q.Args...)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return nil, fmt.Errorf("count error: %w", err)
+	}
+
+	return count, nil
+}
+
+func (e *Engine) executeAggregate(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildAggregate(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("aggregate error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	if len(result.Rows) == 0 {
+		return nil, nil
+	}
+
+	return result.Rows[0], nil
+}
+
+func (e *Engine) executeGroupBy(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildGroupBy(model, args)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := e.connector.Query(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("groupBy error: %w", err)
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, fmt.Errorf("scan error: %w", err)
+	}
+
+	return result.Rows, nil
+}
+
+// ============================================================================
+// Schema operations
+// ============================================================================
+
+// PushSchema creates all tables and enums from the schema.
+func (e *Engine) PushSchema(ctx context.Context) error {
+	// Create enums first
+	for _, enum := range e.schema.Enums {
+		sql := e.builder.BuildCreateEnum(&enum)
+		if _, err := e.connector.Execute(ctx, sql); err != nil {
+			return fmt.Errorf("error creating enum '%s': %w", enum.Name, err)
+		}
+	}
+
+	// Create tables
+	for i := range e.schema.Models {
+		sql := e.builder.BuildCreateTable(&e.schema.Models[i])
+		if _, err := e.connector.Execute(ctx, sql); err != nil {
+			return fmt.Errorf("error creating table for model '%s': %w", e.schema.Models[i].Name, err)
+		}
+	}
+
+	return nil
+}
+
+// ExecuteRaw executes a raw SQL query.
+func (e *Engine) ExecuteRaw(ctx context.Context, sql string, args []interface{}) (interface{}, error) {
+	result, err := e.connector.Execute(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+// QueryRaw executes a raw SQL query and returns rows.
+func (e *Engine) QueryRaw(ctx context.Context, sqlStr string, args []interface{}) (interface{}, error) {
+	rows, err := e.connector.Query(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result, err := connector.ScanRows(rows)
+	if err != nil {
+		return nil, err
+	}
+
+	return result.Rows, nil
+}
+
+// GetSchemaJSON returns the parsed schema as JSON (for the client generator).
+func (e *Engine) GetSchemaJSON() ([]byte, error) {
+	return json.Marshal(e.schema)
+}
+
+// ============================================================================
+// Transaction lifecycle
+// ============================================================================
+
+// mapIsolationLevel converts a string isolation level to sql.IsolationLevel.
+func mapIsolationLevel(level string) sql.IsolationLevel {
+	switch level {
+	case "ReadUncommitted":
+		return sql.LevelReadUncommitted
+	case "ReadCommitted":
+		return sql.LevelReadCommitted
+	case "RepeatableRead":
+		return sql.LevelRepeatableRead
+	case "Serializable":
+		return sql.LevelSerializable
+	default:
+		return sql.LevelDefault
+	}
+}
+
+// BeginTransaction starts a SQL transaction and returns a unique txID.
+func (e *Engine) BeginTransaction(ctx context.Context, isolationLevel string) (string, error) {
+	opts := &sql.TxOptions{
+		Isolation: mapIsolationLevel(isolationLevel),
+	}
+
+	tx, err := e.connector.BeginTx(ctx, opts)
+	if err != nil {
+		return "", fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	txID := uuid.New().String()
+
+	e.txMu.Lock()
+	e.txStore[txID] = tx
+	e.txMu.Unlock()
+
+	return txID, nil
+}
+
+// CommitTransaction commits the transaction identified by txID.
+func (e *Engine) CommitTransaction(txID string) error {
+	e.txMu.Lock()
+	tx, ok := e.txStore[txID]
+	if ok {
+		delete(e.txStore, txID)
+	}
+	e.txMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("transaction '%s' not found", txID)
+	}
+
+	return tx.Commit()
+}
+
+// RollbackTransaction rolls back the transaction identified by txID.
+func (e *Engine) RollbackTransaction(txID string) error {
+	e.txMu.Lock()
+	tx, ok := e.txStore[txID]
+	if ok {
+		delete(e.txStore, txID)
+	}
+	e.txMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("transaction '%s' not found", txID)
+	}
+
+	return tx.Rollback()
+}
+
+// ExecuteInTransaction runs a query/mutation inside the given transaction.
+func (e *Engine) ExecuteInTransaction(ctx context.Context, txID string, model string, action string, args map[string]interface{}) (interface{}, error) {
+	e.txMu.RLock()
+	tx, ok := e.txStore[txID]
+	e.txMu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("transaction '%s' not found", txID)
+	}
+
+	// Use the transaction-scoped executor
+	return e.executeWithTx(ctx, tx, model, action, args)
+}
+
+// executeWithTx dispatches a query using the provided sql.Tx instead of the connector.
+func (e *Engine) executeWithTx(ctx context.Context, tx *sql.Tx, model string, action string, args map[string]interface{}) (interface{}, error) {
+	switch action {
+	case "findMany":
+		return e.txFindMany(ctx, tx, model, args)
+	case "findUnique", "findFirst":
+		return e.txFindUnique(ctx, tx, model, args)
+	case "findUniqueOrThrow", "findFirstOrThrow":
+		result, err := e.txFindUnique(ctx, tx, model, args)
+		if err != nil {
+			return nil, err
+		}
+		if result == nil {
+			return nil, fmt.Errorf("record not found in model '%s'", model)
+		}
+		return result, nil
+	case "create":
+		return e.txCreate(ctx, tx, model, args)
+	case "update":
+		return e.txUpdate(ctx, tx, model, args)
+	case "delete":
+		return e.txDelete(ctx, tx, model, args)
+	case "createMany":
+		return e.txCreateMany(ctx, tx, model, args)
+	case "updateMany":
+		return e.txUpdateMany(ctx, tx, model, args)
+	case "deleteMany":
+		return e.txDeleteMany(ctx, tx, model, args)
+	case "upsert":
+		return e.txUpsert(ctx, tx, model, args)
+	case "count":
+		return e.txCount(ctx, tx, model, args)
+	default:
+		return nil, fmt.Errorf("unsupported action '%s' inside transaction", action)
+	}
+}
+
+// --- Transaction-scoped query helpers ---
+
+func (e *Engine) txQuery(ctx context.Context, tx *sql.Tx, sql string, args ...interface{}) (*connector.QueryResult, error) {
+	rows, err := tx.QueryContext(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return connector.ScanRows(rows)
+}
+
+func (e *Engine) txFindMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildFindMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error: %w", err)
+	}
+	return result.Rows, nil
+}
+
+func (e *Engine) txFindUnique(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildFindUnique(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error: %w", err)
+	}
+	if len(result.Rows) == 0 {
+		return nil, nil
+	}
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txCreate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCreate(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("create error: %w", err)
+	}
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("create returned no data")
+	}
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txUpdate(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpdate(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("update error: %w", err)
+	}
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("record not found for update in model '%s'", model)
+	}
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txDelete(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildDelete(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("delete error: %w", err)
+	}
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("record not found for delete in model '%s'", model)
+	}
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txCreateMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCreateMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+	if q.SQL == "" {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	result, err := tx.ExecContext(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("createMany error: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) txUpdateMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpdateMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("updateMany error: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) txDeleteMany(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildDeleteMany(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := tx.ExecContext(ctx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("deleteMany error: %w", err)
+	}
+	count, _ := result.RowsAffected()
+	return map[string]interface{}{"count": count}, nil
+}
+
+func (e *Engine) txUpsert(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildUpsert(model, args)
+	if err != nil {
+		return nil, err
+	}
+	result, err := e.txQuery(ctx, tx, q.SQL, q.Args...)
+	if err != nil {
+		return nil, fmt.Errorf("upsert error: %w", err)
+	}
+	if len(result.Rows) == 0 {
+		return nil, fmt.Errorf("upsert returned no data")
+	}
+	return result.Rows[0], nil
+}
+
+func (e *Engine) txCount(ctx context.Context, tx *sql.Tx, model string, args map[string]interface{}) (interface{}, error) {
+	q, err := e.builder.BuildCount(model, args)
+	if err != nil {
+		return nil, err
+	}
+	row := tx.QueryRowContext(ctx, q.SQL, q.Args...)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return nil, fmt.Errorf("count error: %w", err)
+	}
+	return count, nil
+}
+
+// ============================================================================
+// Pagination
+// ============================================================================
+
+// executeFindManyPaginated runs a paginated findMany: COUNT(*) + SELECT with LIMIT/OFFSET.
+func (e *Engine) executeFindManyPaginated(ctx context.Context, model string, args map[string]interface{}) (interface{}, error) {
+	// Extract pagination params with defaults
+	page := 1
+	limit := 10
+
+	if p, ok := args["page"]; ok {
+		if pf, ok := p.(float64); ok {
+			page = int(pf)
+		}
+	}
+	if l, ok := args["limit"]; ok {
+		if lf, ok := l.(float64); ok {
+			limit = int(lf)
+		}
+	}
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 {
+		limit = 10
+	}
+
+	// Run COUNT(*) with the same WHERE
+	countArgs := make(map[string]interface{})
+	if where, ok := args["where"]; ok {
+		countArgs["where"] = where
+	}
+
+	totalResult, err := e.executeCount(ctx, model, countArgs)
+	if err != nil {
+		return nil, fmt.Errorf("pagination count error: %w", err)
+	}
+	total, _ := totalResult.(int64)
+
+	// Build findMany args with skip/take
+	findArgs := make(map[string]interface{})
+	for k, v := range args {
+		if k != "page" && k != "limit" {
+			findArgs[k] = v
+		}
+	}
+	findArgs["take"] = float64(limit)
+	findArgs["skip"] = float64((page - 1) * limit)
+
+	data, err := e.executeFindMany(ctx, model, findArgs)
+	if err != nil {
+		return nil, fmt.Errorf("pagination query error: %w", err)
+	}
+
+	totalPages := int(math.Ceil(float64(total) / float64(limit)))
+	hasNext := page < totalPages
+
+	return map[string]interface{}{
+		"data":     data,
+		"page":     page,
+		"limit":    limit,
+		"has_next":  hasNext,
+		"total":    total,
+	}, nil
+}

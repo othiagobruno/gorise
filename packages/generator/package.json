@@ -1,0 +1,45 @@
+{
+  "name": "@practor/generator",
+  "version": "0.1.0",
+  "description": "Practor ORM Client Generator — Generates type-safe TypeScript client from schema",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "jest"
+  },
+  "keywords": [
+    "orm",
+    "codegen",
+    "typescript",
+    "generator",
+    "prisma",
+    "practor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/othiagobruno/practor",
+    "directory": "packages/generator"
+  },
+  "homepage": "https://github.com/othiagobruno/practor#readme",
+  "bugs": {
+    "url": "https://github.com/othiagobruno/practor/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "@types/node": "^20.0.0"
+  },
+  "license": "MIT"
+}
