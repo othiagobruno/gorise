@@ -57,19 +57,37 @@ export class PractorEngine extends EventEmitter {
     this.poolConfig = options.poolConfig;
   }
 
-  /** Resolves the path to the Go engine binary. */
+  /**
+   * Resolves the path to the Go engine binary.
+   *
+   * Resolution order:
+   * 1. PRACTOR_ENGINE_PATH env var (explicit override)
+   * 2. Platform-specific @practor/engine-{os}-{arch} npm package
+   * 3. Local bin/ directory (development fallback)
+   */
   private resolveEnginePath(): string {
-    // Check for custom PRACTOR_ENGINE_PATH env var
+    // 1. Explicit override via env var
     const envPath = process.env.PRACTOR_ENGINE_PATH;
     if (envPath) return envPath;
 
-    // Default: look in the project's bin directory
-    return path.resolve(
-      process.cwd(),
-      "node_modules",
-      ".practor",
-      "practor-engine",
-    );
+    // 2. Detect platform and resolve from npm package
+    const platform = process.platform; // darwin, linux, win32
+    const arch = process.arch; // x64, arm64
+    const isWindows = platform === "win32";
+    const binaryName = isWindows ? "practor-engine.exe" : "practor-engine";
+    const packageName = `@practor/engine-${platform}-${arch}`;
+
+    try {
+      const packageDir = path.dirname(
+        require.resolve(`${packageName}/package.json`),
+      );
+      return path.join(packageDir, "bin", binaryName);
+    } catch {
+      // Package not installed — fall through to local fallback
+    }
+
+    // 3. Local development fallback
+    return path.resolve(process.cwd(), "bin", "practor-engine");
   }
 
   /** Starts the engine process and waits for the ready signal. */

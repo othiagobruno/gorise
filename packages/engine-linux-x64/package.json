@@ -1,0 +1,23 @@
+{
+  "name": "@practor/engine-linux-x64",
+  "version": "0.2.0",
+  "description": "Practor Go query engine binary for Linux x64",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/othiagobruno/practor",
+    "directory": "packages/engine-linux-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

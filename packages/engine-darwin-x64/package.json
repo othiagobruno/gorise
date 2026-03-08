@@ -1,0 +1,23 @@
+{
+  "name": "@practor/engine-darwin-x64",
+  "version": "0.2.0",
+  "description": "Practor Go query engine binary for macOS x64",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/othiagobruno/practor",
+    "directory": "packages/engine-darwin-x64"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}

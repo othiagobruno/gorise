@@ -1,0 +1,23 @@
+{
+  "name": "@practor/engine-darwin-arm64",
+  "version": "0.2.0",
+  "description": "Practor Go query engine binary for macOS ARM64 (Apple Silicon)",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/othiagobruno/practor",
+    "directory": "packages/engine-darwin-arm64"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "MIT"
+}
