@@ -9,7 +9,7 @@ import { ChildProcess, spawn } from "child_process";
 import { EventEmitter } from "events";
 import * as path from "path";
 import * as readline from "readline";
-import type { RPCRequest, RPCResponse, RPCError } from "./types";
+import type { RPCRequest, RPCResponse, RPCError, PoolConfig } from "./types";
 
 /** Engine connection state. */
 type EngineState = "idle" | "starting" | "ready" | "error" | "stopped";
@@ -38,6 +38,7 @@ export class PractorEngine extends EventEmitter {
   private schemaPath: string;
   private datasourceUrl?: string;
   private requestTimeout: number;
+  private poolConfig?: PoolConfig;
 
   constructor(
     options: {
@@ -45,6 +46,7 @@ export class PractorEngine extends EventEmitter {
       schemaPath?: string;
       datasourceUrl?: string;
       requestTimeout?: number;
+      poolConfig?: PoolConfig;
     } = {},
   ) {
     super();
@@ -52,6 +54,7 @@ export class PractorEngine extends EventEmitter {
     this.schemaPath = options.schemaPath || "schema.practor";
     this.datasourceUrl = options.datasourceUrl;
     this.requestTimeout = options.requestTimeout || 30_000;
+    this.poolConfig = options.poolConfig;
   }
 
   /** Resolves the path to the Go engine binary. */
@@ -87,6 +90,26 @@ export class PractorEngine extends EventEmitter {
     env.PRACTOR_SCHEMA_PATH = this.schemaPath;
     if (this.datasourceUrl) {
       env.DATABASE_URL = this.datasourceUrl;
+    }
+
+    // Inject connection pool configuration as env vars
+    if (this.poolConfig) {
+      if (this.poolConfig.maxOpenConns) {
+        env.PRACTOR_POOL_MAX_OPEN_CONNS = String(this.poolConfig.maxOpenConns);
+      }
+      if (this.poolConfig.maxIdleConns) {
+        env.PRACTOR_POOL_MAX_IDLE_CONNS = String(this.poolConfig.maxIdleConns);
+      }
+      if (this.poolConfig.connMaxLifetimeMs) {
+        env.PRACTOR_POOL_CONN_MAX_LIFETIME_MS = String(
+          this.poolConfig.connMaxLifetimeMs,
+        );
+      }
+      if (this.poolConfig.connMaxIdleTimeMs) {
+        env.PRACTOR_POOL_CONN_MAX_IDLE_TIME_MS = String(
+          this.poolConfig.connMaxIdleTimeMs,
+        );
+      }
     }
 
     this.process = spawn(this.enginePath, [], {

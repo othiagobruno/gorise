@@ -3,6 +3,11 @@
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  // Connection pool configuration (optional):
+  // Pool settings can be customized via PractorClientOptions.pool
+  // or environment variables: PRACTOR_POOL_MAX_OPEN_CONNS,
+  // PRACTOR_POOL_MAX_IDLE_CONNS, PRACTOR_POOL_CONN_MAX_LIFETIME_MS,
+  // PRACTOR_POOL_CONN_MAX_IDLE_TIME_MS
 }
 
 generator client {

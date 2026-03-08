@@ -321,16 +321,139 @@ function cmdMigrateDev(name?: string): void {
   const schemaPath = findSchemaPath();
   if (!fs.existsSync(schemaPath)) {
     console.error(`❌ Schema file not found: ${schemaPath}`);
+    console.error("   Run `npx practor init` to create one.");
     process.exit(1);
   }
 
   loadEnv();
 
-  // For now, delegate to db push (full migration support comes later)
-  console.log(
-    "  ℹ️  Migration engine is in development. Using `db push` mode.\n",
-  );
-  cmdDbPush();
+  const enginePath = resolveEnginePath();
+  const migrationsDir = path.resolve(process.cwd(), "migrations");
+
+  const { spawnSync } = require("child_process");
+  const env = { ...process.env, PRACTOR_SCHEMA_PATH: schemaPath };
+
+  const request =
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "migrate.dev",
+      params: {
+        schemaPath,
+        migrationsDir,
+        name: name || "migration",
+      },
+    }) + "\n";
+
+  const result = spawnSync(enginePath, [], {
+    input: request,
+    encoding: "utf-8",
+    timeout: 60_000,
+    env,
+  });
+
+  if (result.error) {
+    console.error("❌ Engine error:", result.error.message);
+    process.exit(1);
+  }
+
+  const lines = (result.stdout || "").trim().split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const response = JSON.parse(line);
+      if (response.id === 1) {
+        if (response.error) {
+          console.error("❌ Migration error:", response.error.message);
+          process.exit(1);
+        }
+        const r = response.result;
+        console.log(`  ✅ ${r?.message || "Migration created and applied"}`);
+        if (r?.filePath) {
+          console.log(`  📁 File: ${path.relative(process.cwd(), r.filePath)}`);
+        }
+        if (r?.migrationId) {
+          console.log(`  🏷️  ID: ${r.migrationId}\n`);
+        }
+        return;
+      }
+    } catch {
+      // Skip non-JSON lines
+    }
+  }
+
+  if (result.stderr) {
+    console.error(result.stderr);
+  }
+}
+
+/** `practor migrate deploy` — Apply pending migrations in production. */
+function cmdMigrateDeploy(): void {
+  console.log("🚀 Deploying migrations...\n");
+
+  const schemaPath = findSchemaPath();
+  loadEnv();
+
+  const enginePath = resolveEnginePath();
+  const migrationsDir = path.resolve(process.cwd(), "migrations");
+
+  if (!fs.existsSync(migrationsDir)) {
+    console.log("  ℹ️  No migrations directory found. Nothing to deploy.");
+    return;
+  }
+
+  const { spawnSync } = require("child_process");
+  const env = { ...process.env, PRACTOR_SCHEMA_PATH: schemaPath };
+
+  const request =
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "migrate.deploy",
+      params: {
+        migrationsDir,
+      },
+    }) + "\n";
+
+  const result = spawnSync(enginePath, [], {
+    input: request,
+    encoding: "utf-8",
+    timeout: 120_000,
+    env,
+  });
+
+  if (result.error) {
+    console.error("❌ Engine error:", result.error.message);
+    process.exit(1);
+  }
+
+  const lines = (result.stdout || "").trim().split("\n").filter(Boolean);
+  for (const line of lines) {
+    try {
+      const response = JSON.parse(line);
+      if (response.id === 1) {
+        if (response.error) {
+          console.error("❌ Deploy error:", response.error.message);
+          process.exit(1);
+        }
+        const r = response.result;
+        console.log(`  ✅ ${r?.message || "Deploy completed"}`);
+        if (r?.applied?.length > 0) {
+          console.log(`\n  Applied migrations:`);
+          for (const migId of r.applied) {
+            console.log(`    • ${migId}`);
+          }
+        }
+        console.log("");
+        return;
+      }
+    } catch {
+      // Skip non-JSON lines
+    }
+  }
+
+  if (result.stderr) {
+    console.error(result.stderr);
+  }
 }
 
 // ============================================================================
@@ -369,21 +492,23 @@ Practor ORM v${VERSION}
 Usage: practor <command> [options]
 
 Commands:
-  init            Initialize a new Practor project
-  generate        Generate the TypeScript client from schema
-  validate        Validate the schema file
-  db push         Push schema changes to the database (no migration files)
-  migrate dev     Create and apply a migration (development)
+  init              Initialize a new Practor project
+  generate          Generate the TypeScript client from schema
+  validate          Validate the schema file
+  db push           Push schema changes to the database (no migration files)
+  migrate dev       Create and apply a migration (development)
+  migrate deploy    Apply pending migrations (production)
 
 Options:
-  --help, -h      Show this help
-  --version, -v   Show version
+  --help, -h        Show this help
+  --version, -v     Show version
 
 Examples:
   npx practor init
   npx practor generate
   npx practor db push
   npx practor migrate dev --name add_users_table
+  npx practor migrate deploy
 `);
 }
 
@@ -444,7 +569,7 @@ function main(): void {
           cmdMigrateDev(name);
           break;
         case "deploy":
-          console.log("ℹ️  Migrate deploy is not yet available.");
+          cmdMigrateDeploy();
           break;
         case "reset":
           console.log("ℹ️  Migrate reset is not yet available.");

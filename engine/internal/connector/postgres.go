@@ -15,13 +15,14 @@ import (
 
 // PostgresConnector implements the Connector interface for PostgreSQL.
 type PostgresConnector struct {
-	db  *sql.DB
-	dsn string
+	db   *sql.DB
+	dsn  string
+	pool PoolConfig
 }
 
-// NewPostgresConnector creates a new PostgreSQL connector.
-func NewPostgresConnector(dsn string) *PostgresConnector {
-	return &PostgresConnector{dsn: dsn}
+// NewPostgresConnector creates a new PostgreSQL connector with pool configuration.
+func NewPostgresConnector(dsn string, pool PoolConfig) *PostgresConnector {
+	return &PostgresConnector{dsn: dsn, pool: pool}
 }
 
 // Connect establishes a connection to the PostgreSQL database.
@@ -31,9 +32,8 @@ func (c *PostgresConnector) Connect(ctx context.Context) error {
 		return fmt.Errorf("failed to open postgres connection: %w", err)
 	}
 
-	// Set connection pool defaults
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(5)
+	// Apply configurable pool settings (with sensible defaults)
+	c.pool.Apply(db)
 
 	if err := db.PingContext(ctx); err != nil {
 		return fmt.Errorf("failed to ping postgres: %w", err)
@@ -84,6 +84,25 @@ func (c *PostgresConnector) Ping(ctx context.Context) error {
 // BeginTx starts a new transaction.
 func (c *PostgresConnector) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
 	return c.db.BeginTx(ctx, opts)
+}
+
+// GetPoolStats returns runtime connection pool statistics from the underlying *sql.DB.
+func (c *PostgresConnector) GetPoolStats() *PoolStats {
+	if c.db == nil {
+		return &PoolStats{}
+	}
+	s := c.db.Stats()
+	return &PoolStats{
+		MaxOpenConnections: s.MaxOpenConnections,
+		OpenConnections:    s.OpenConnections,
+		InUse:              s.InUse,
+		Idle:               s.Idle,
+		WaitCount:          int(s.WaitCount),
+		WaitDurationMs:     int(s.WaitDuration.Milliseconds()),
+		MaxIdleClosed:      int(s.MaxIdleClosed),
+		MaxIdleTimeClosed:  int(s.MaxIdleTimeClosed),
+		MaxLifetimeClosed:  int(s.MaxLifetimeClosed),
+	}
 }
 
 // ============================================================================

@@ -1,6 +1,6 @@
 {
   "name": "@practor/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Practor ORM CLI — Schema management, generation, and migrations",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -41,7 +41,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "@practor/generator": "0.1.0"
+    "@practor/generator": "0.2.0"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

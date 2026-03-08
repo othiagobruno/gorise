@@ -83,6 +83,18 @@ type DbPushParams struct {
 	ForceReset    bool   `json:"forceReset"`
 }
 
+// MigrateDeployParams represents parameters for the migrate deploy command.
+type MigrateDeployParams struct {
+	MigrationsDir string `json:"migrationsDir"`
+}
+
+// MigrateDevParams represents parameters for the migrate dev command.
+type MigrateDevParams struct {
+	SchemaPath    string `json:"schemaPath"`
+	MigrationsDir string `json:"migrationsDir"`
+	Name          string `json:"name"`
+}
+
 // TransactionBeginParams represents parameters for starting a transaction.
 type TransactionBeginParams struct {
 	IsolationLevel string `json:"isolationLevel,omitempty"`
@@ -137,6 +149,21 @@ type SchemaResponse struct {
 	Schema interface{} `json:"schema,omitempty"`
 	Valid  bool        `json:"valid"`
 	Errors []string    `json:"errors,omitempty"`
+}
+
+// MigrateDeployResponse represents the result of a migrate deploy operation.
+type MigrateDeployResponse struct {
+	Applied []string `json:"applied"`
+	Count   int      `json:"count"`
+	Message string   `json:"message"`
+}
+
+// MigrateDevResponse represents the result of a migrate dev operation.
+type MigrateDevResponse struct {
+	MigrationID string `json:"migrationId"`
+	SQL         string `json:"sql"`
+	FilePath    string `json:"filePath"`
+	Message     string `json:"message"`
 }
 
 // ============================================================================

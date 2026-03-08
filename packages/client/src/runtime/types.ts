@@ -261,6 +261,9 @@ export interface ModelDelegate<
   paginate(
     args?: PaginationArgs<TWhere, TSelect, TInclude, TOrderBy>,
   ): Promise<PaginationResult<TModel>>;
+  cursorPaginate(
+    args?: CursorPaginationArgs<TWhere, TSelect, TInclude, TOrderBy>,
+  ): Promise<CursorPaginationResult<TModel>>;
 }
 
 // ============================================================================
@@ -291,11 +294,46 @@ export interface PractorClientOptions {
   /** Database URL (overrides env). */
   datasourceUrl?: string;
 
+  /** Connection pool configuration. */
+  pool?: PoolConfig;
+
   /** Enable query logging. */
   log?: ("query" | "info" | "warn" | "error")[];
 
   /** Error formatting. */
   errorFormat?: "pretty" | "minimal" | "colorless";
+}
+
+// ============================================================================
+// Connection pool types
+// ============================================================================
+
+/** Configurable connection pool parameters passed to the Go engine. */
+export interface PoolConfig {
+  /** Maximum number of open connections to the database. Default: 20 */
+  maxOpenConns?: number;
+
+  /** Maximum number of idle connections in the pool. Default: 5 */
+  maxIdleConns?: number;
+
+  /** Maximum connection lifetime in milliseconds. Default: 300000 (5 min) */
+  connMaxLifetimeMs?: number;
+
+  /** Maximum idle time per connection in milliseconds. Default: 60000 (1 min) */
+  connMaxIdleTimeMs?: number;
+}
+
+/** Runtime connection pool statistics returned by the Go engine. */
+export interface PoolStats {
+  maxOpenConnections: number;
+  openConnections: number;
+  inUse: number;
+  idle: number;
+  waitCount: number;
+  waitDurationMs: number;
+  maxIdleClosed: number;
+  maxIdleTimeClosed: number;
+  maxLifetimeClosed: number;
 }
 
 // ============================================================================
@@ -324,4 +362,36 @@ export interface PaginationResult<T = any> {
   limit: number;
   has_next: boolean;
   total: number;
+}
+
+// ============================================================================
+// Cursor-based pagination types
+// ============================================================================
+
+/** Cursor-based pagination query arguments. */
+export interface CursorPaginationArgs<
+  TWhere = any,
+  TSelect = any,
+  TInclude = any,
+  TOrderBy = any,
+> {
+  /** Cursor object identifying the anchor record (e.g. `{ id: 42 }`). Omit for first page. */
+  cursor?: Record<string, any>;
+  /** Number of records to return per page (default: 10). */
+  take?: number;
+  where?: TWhere;
+  select?: TSelect;
+  include?: TInclude;
+  /** Required — determines cursor scan direction. */
+  orderBy?: TOrderBy | TOrderBy[];
+}
+
+/** Cursor-based pagination result envelope. */
+export interface CursorPaginationResult<T = any> {
+  /** Records for this page. */
+  data: T[];
+  /** Cursor value for the next page. `null` when on the last page. */
+  nextCursor: unknown | null;
+  /** Whether more records exist beyond this page. */
+  hasNextPage: boolean;
 }

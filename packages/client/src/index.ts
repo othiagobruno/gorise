@@ -4,11 +4,21 @@
 
 export { PractorClient } from "./runtime/client";
 export { PractorEngine, PractorError } from "./runtime/engine";
+export {
+  MiddlewareEngine,
+  type MiddlewareParams,
+  type MiddlewareNext,
+  type MiddlewareFunction,
+} from "./runtime/middleware";
 export type {
   // Core types
   PractorClientOptions,
   ModelDelegate,
   TransactionPayload,
+
+  // Pool types
+  PoolConfig,
+  PoolStats,
 
   // Filter types
   StringFilter,
@@ -36,4 +46,10 @@ export type {
   RPCRequest,
   RPCResponse,
   RPCError,
+
+  // Pagination types
+  PaginationArgs,
+  PaginationResult,
+  CursorPaginationArgs,
+  CursorPaginationResult,
 } from "./runtime/types";

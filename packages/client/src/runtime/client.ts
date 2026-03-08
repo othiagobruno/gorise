@@ -6,11 +6,18 @@
  */
 
 import { PractorEngine, PractorError } from "./engine";
+import {
+  MiddlewareEngine,
+  type MiddlewareFunction,
+  type MiddlewareParams,
+} from "./middleware";
 import type {
   PractorClientOptions,
   ModelDelegate,
   TransactionOptions,
   PaginationResult,
+  CursorPaginationResult,
+  PoolStats,
 } from "./types";
 
 /**
@@ -42,6 +49,7 @@ export class PractorClient {
   private engine: PractorEngine;
   private options: PractorClientOptions;
   private connected = false;
+  private middlewareEngine: MiddlewareEngine = new MiddlewareEngine();
   private modelDelegates: Map<string, ModelDelegate> = new Map();
 
   /** Known model names from the schema. Populated after connect. */
@@ -55,6 +63,7 @@ export class PractorClient {
       enginePath: options.enginePath,
       schemaPath: options.schemaPath,
       datasourceUrl: options.datasourceUrl,
+      poolConfig: options.pool,
     });
 
     // Set up logging
@@ -109,6 +118,51 @@ export class PractorClient {
     if (!this.connected) return;
     await this.engine.stop();
     this.connected = false;
+  }
+
+  /**
+   * Returns runtime connection pool statistics from the Go engine.
+   *
+   * @example
+   * ```ts
+   * const stats = await practor.$pool();
+   * console.log(`Active: ${stats.inUse}, Idle: ${stats.idle}`);
+   * ```
+   */
+  async $pool(): Promise<PoolStats> {
+    this.ensureConnected();
+    const result = await this.engine.request("pool.getStats", {});
+    return result as PoolStats;
+  }
+
+  /**
+   * Registers a middleware function that intercepts all model operations.
+   *
+   * Middleware runs in FIFO order — first registered = outermost wrapper.
+   * Each middleware can inspect/mutate params and results.
+   *
+   * @example
+   * ```ts
+   * // Logging middleware
+   * practor.$use(async (params, next) => {
+   *   console.log(`${params.model}.${params.action}`);
+   *   const result = await next(params);
+   *   console.log(`Done in ${Date.now() - start}ms`);
+   *   return result;
+   * });
+   *
+   * // Soft-delete middleware
+   * practor.$use(async (params, next) => {
+   *   if (params.action === 'delete') {
+   *     params.action = 'update';
+   *     params.args = { ...params.args, data: { deletedAt: new Date() } };
+   *   }
+   *   return next(params);
+   * });
+   * ```
+   */
+  $use(fn: MiddlewareFunction): void {
+    this.middlewareEngine.use(fn);
   }
 
   /**
@@ -295,28 +349,73 @@ export class PractorClient {
 
       for (const action of allActions) {
         txDelegate[action] = async (args: Record<string, unknown> = {}) => {
-          const method = queryActions.includes(action)
+          const rpcMethod = queryActions.includes(action)
             ? "transaction.query"
             : "transaction.mutation";
 
-          const result = await this.engine.request(method, {
-            txId,
+          // Route through middleware chain (tx-scoped)
+          const middlewareParams: MiddlewareParams = {
             model: modelName,
             action,
             args,
-          });
+            method: queryActions.includes(action) ? "query" : "mutation",
+          };
 
-          const response = result as any;
-          return response?.data ?? response;
+          return this.middlewareEngine.execute(
+            middlewareParams,
+            async (p: MiddlewareParams) => {
+              const txRpcMethod =
+                p.method === "query"
+                  ? "transaction.query"
+                  : "transaction.mutation";
+
+              const result = await this.engine.request(txRpcMethod, {
+                txId,
+                model: p.model,
+                action: p.action,
+                args: p.args,
+              });
+
+              const response = result as any;
+              return response?.data ?? response;
+            },
+          );
         };
       }
 
       // Add paginate to transaction proxy
       txDelegate["paginate"] = async (args: Record<string, unknown> = {}) => {
+        const middlewareParams: MiddlewareParams = {
+          model: modelName,
+          action: "findManyPaginated",
+          args,
+          method: "query",
+        };
+
+        return this.middlewareEngine.execute(
+          middlewareParams,
+          async (p: MiddlewareParams) => {
+            const result = await this.engine.request("transaction.query", {
+              txId,
+              model: p.model,
+              action: p.action,
+              args: p.args,
+            });
+
+            const response = result as any;
+            return response?.data ?? response;
+          },
+        );
+      };
+
+      // Add cursorPaginate to transaction proxy
+      txDelegate["cursorPaginate"] = async (
+        args: Record<string, unknown> = {},
+      ): Promise<CursorPaginationResult> => {
         const result = await this.engine.request("transaction.query", {
           txId,
           model: modelName,
-          action: "findManyPaginated",
+          action: "findManyCursorPaginated",
           args,
         });
 
@@ -379,15 +478,26 @@ export class PractorClient {
           );
         }
 
-        const result = await this.engine.request(method, {
+        // Route through middleware chain
+        const middlewareParams: MiddlewareParams = {
           model: modelName,
           action,
           args,
-        });
+          method,
+        };
 
-        // Extract data from response envelope
-        const response = result as any;
-        return response?.data ?? response;
+        return this.middlewareEngine.execute(
+          middlewareParams,
+          async (p: MiddlewareParams) => {
+            const result = await this.engine.request(p.method, {
+              model: p.model,
+              action: p.action,
+              args: p.args,
+            });
+            const response = result as any;
+            return response?.data ?? response;
+          },
+        );
       };
     }
 
@@ -404,14 +514,59 @@ export class PractorClient {
         );
       }
 
-      const result = await this.engine.request("query", {
+      const middlewareParams: MiddlewareParams = {
         model: modelName,
         action: "findManyPaginated",
         args,
-      });
+        method: "query",
+      };
 
-      const response = result as any;
-      return response?.data ?? response;
+      return this.middlewareEngine.execute(
+        middlewareParams,
+        async (p: MiddlewareParams) => {
+          const result = await this.engine.request("query", {
+            model: p.model,
+            action: p.action,
+            args: p.args,
+          });
+          const response = result as any;
+          return response?.data ?? response;
+        },
+      ) as Promise<PaginationResult>;
+    };
+
+    // Cursor-based pagination convenience method
+    delegate["cursorPaginate"] = async (
+      args: Record<string, unknown> = {},
+    ): Promise<CursorPaginationResult> => {
+      this.ensureConnected();
+
+      if (this.options.log?.includes("query")) {
+        console.log(
+          `[Practor Query] ${modelName}.cursorPaginate`,
+          JSON.stringify(args, null, 2),
+        );
+      }
+
+      const middlewareParams: MiddlewareParams = {
+        model: modelName,
+        action: "findManyCursorPaginated",
+        args,
+        method: "query",
+      };
+
+      return this.middlewareEngine.execute(
+        middlewareParams,
+        async (p: MiddlewareParams) => {
+          const result = await this.engine.request("query", {
+            model: p.model,
+            action: p.action,
+            args: p.args,
+          });
+          const response = result as any;
+          return response?.data ?? response;
+        },
+      ) as Promise<CursorPaginationResult>;
     };
 
     return delegate as unknown as ModelDelegate;

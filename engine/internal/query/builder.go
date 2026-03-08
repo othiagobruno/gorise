@@ -682,6 +682,111 @@ func (b *Builder) BuildGroupBy(modelName string, args map[string]interface{}) (*
 }
 
 // ============================================================================
+// Cursor-based pagination builder
+// ============================================================================
+
+// BuildFindManyCursorPaginated generates a SELECT with cursor-based WHERE filtering.
+// It expects args to contain:
+//   - "cursor": map[string]interface{} (optional — omit for first page)
+//   - "take":   float64              (limit, already incremented by +1 by the caller)
+//   - "where":  map[string]interface{} (optional — additional filters)
+//   - "orderBy": map[string]interface{} or []interface{} (required — determines direction)
+//   - "select": map[string]interface{} (optional)
+func (b *Builder) BuildFindManyCursorPaginated(modelName string, args map[string]interface{}) (*BuiltQuery, error) {
+	b.resetParams()
+	model := b.getModel(modelName)
+	if model == nil {
+		return nil, fmt.Errorf("model '%s' not found", modelName)
+	}
+
+	var sqlArgs []interface{}
+
+	// SELECT columns
+	selectCols := b.buildSelectColumns(model, args)
+
+	// FROM
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s", selectCols, b.tableName(model))
+
+	// Collect WHERE conditions: user-provided + cursor condition
+	var allConditions []string
+
+	// User-provided WHERE
+	if where, ok := args["where"]; ok {
+		whereClause, whereArgs, err := b.buildWhere(model, where)
+		if err != nil {
+			return nil, err
+		}
+		if whereClause != "" {
+			allConditions = append(allConditions, whereClause)
+			sqlArgs = append(sqlArgs, whereArgs...)
+		}
+	}
+
+	// Cursor WHERE: field > value (ASC) or field < value (DESC)
+	if cursor, ok := args["cursor"].(map[string]interface{}); ok && len(cursor) > 0 {
+		direction := b.extractCursorDirection(args)
+		op := ">"
+		if direction == "DESC" {
+			op = "<"
+		}
+
+		for fieldName, cursorValue := range cursor {
+			field := model.GetFieldByName(fieldName)
+			if field == nil {
+				return nil, fmt.Errorf("cursor field '%s' not found in model '%s'", fieldName, modelName)
+			}
+			allConditions = append(allConditions, fmt.Sprintf("%s %s %s", b.columnName(field), op, b.placeholder()))
+			sqlArgs = append(sqlArgs, cursorValue)
+		}
+	}
+
+	if len(allConditions) > 0 {
+		sqlStr += " WHERE " + strings.Join(allConditions, " AND ")
+	}
+
+	// ORDER BY
+	if orderBy, ok := args["orderBy"]; ok {
+		orderClause := b.buildOrderBy(model, orderBy)
+		if orderClause != "" {
+			sqlStr += " ORDER BY " + orderClause
+		}
+	}
+
+	// LIMIT (take, already +1 from caller)
+	if take, ok := args["take"]; ok {
+		sqlStr += fmt.Sprintf(" LIMIT %s", b.placeholder())
+		sqlArgs = append(sqlArgs, take)
+	}
+
+	return &BuiltQuery{SQL: sqlStr, Args: sqlArgs, Action: "findManyCursorPaginated"}, nil
+}
+
+// extractCursorDirection inspects orderBy to determine cursor scan direction.
+func (b *Builder) extractCursorDirection(args map[string]interface{}) string {
+	if orderBy, ok := args["orderBy"]; ok {
+		switch ob := orderBy.(type) {
+		case map[string]interface{}:
+			for _, dir := range ob {
+				if strings.ToUpper(fmt.Sprintf("%v", dir)) == "DESC" {
+					return "DESC"
+				}
+			}
+		case []interface{}:
+			if len(ob) > 0 {
+				if first, ok := ob[0].(map[string]interface{}); ok {
+					for _, dir := range first {
+						if strings.ToUpper(fmt.Sprintf("%v", dir)) == "DESC" {
+							return "DESC"
+						}
+					}
+				}
+			}
+		}
+	}
+	return "ASC"
+}
+
+// ============================================================================
 // WHERE clause builder
 // ============================================================================
 
@@ -880,6 +985,156 @@ func (b *Builder) buildSelectColumns(model *schema.Model, args map[string]interf
 		cols = append(cols, b.columnName(&field))
 	}
 	return strings.Join(cols, ", ")
+}
+
+// ============================================================================
+// Relation query builders
+// ============================================================================
+
+// BuildRelationQuery generates a SELECT for loading related rows using WHERE fk IN (...).
+//
+// Used for HasMany / HasOne directions where the FK lives on the TARGET table.
+// Example: Loading posts for users → SELECT * FROM "post" WHERE "author_id" IN ($1, $2, ...)
+func (b *Builder) BuildRelationQuery(
+	targetModelName string,
+	fkFieldName string,
+	parentIDs []interface{},
+	nestedArgs map[string]interface{},
+) (*BuiltQuery, error) {
+	b.resetParams()
+	targetModel := b.getModel(targetModelName)
+	if targetModel == nil {
+		return nil, fmt.Errorf("relation target model '%s' not found", targetModelName)
+	}
+
+	fkField := targetModel.GetFieldByName(fkFieldName)
+	if fkField == nil {
+		return nil, fmt.Errorf("FK field '%s' not found in model '%s'", fkFieldName, targetModelName)
+	}
+
+	// SELECT columns (respecting nested select if provided)
+	selectCols := b.buildSelectColumns(targetModel, nestedArgs)
+
+	// Always include the FK column so we can group results by parent
+	fkCol := b.columnName(fkField)
+	if !strings.Contains(selectCols, fkCol) {
+		selectCols = fkCol + ", " + selectCols
+	}
+
+	// WHERE fk IN (...)
+	var placeholders []string
+	var sqlArgs []interface{}
+	for _, id := range parentIDs {
+		placeholders = append(placeholders, b.placeholder())
+		sqlArgs = append(sqlArgs, id)
+	}
+
+	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (%s)",
+		selectCols,
+		b.tableName(targetModel),
+		fkCol,
+		strings.Join(placeholders, ", "),
+	)
+
+	// Additional WHERE conditions from nested args
+	if where, ok := nestedArgs["where"]; ok {
+		whereClause, whereArgs, err := b.buildWhere(targetModel, where)
+		if err != nil {
+			return nil, err
+		}
+		if whereClause != "" {
+			sql += " AND " + whereClause
+			sqlArgs = append(sqlArgs, whereArgs...)
+		}
+	}
+
+	// ORDER BY
+	if orderBy, ok := nestedArgs["orderBy"]; ok {
+		orderClause := b.buildOrderBy(targetModel, orderBy)
+		if orderClause != "" {
+			sql += " ORDER BY " + orderClause
+		}
+	}
+
+	// LIMIT (take)
+	if take, ok := nestedArgs["take"]; ok {
+		sql += fmt.Sprintf(" LIMIT %s", b.placeholder())
+		sqlArgs = append(sqlArgs, take)
+	}
+
+	// OFFSET (skip)
+	if skip, ok := nestedArgs["skip"]; ok {
+		sql += fmt.Sprintf(" OFFSET %s", b.placeholder())
+		sqlArgs = append(sqlArgs, skip)
+	}
+
+	return &BuiltQuery{SQL: sql, Args: sqlArgs, Action: "relationQuery"}, nil
+}
+
+// BuildBelongsToQuery generates a SELECT for loading parent rows using WHERE pk IN (...).
+//
+// Used for BelongsTo direction where the FK lives on the SOURCE table.
+// Example: Loading author for posts → SELECT * FROM "user" WHERE "id" IN ($1, $2, ...)
+func (b *Builder) BuildBelongsToQuery(
+	targetModelName string,
+	refFieldName string,
+	parentFKValues []interface{},
+	nestedArgs map[string]interface{},
+) (*BuiltQuery, error) {
+	b.resetParams()
+	targetModel := b.getModel(targetModelName)
+	if targetModel == nil {
+		return nil, fmt.Errorf("relation target model '%s' not found", targetModelName)
+	}
+
+	refField := targetModel.GetFieldByName(refFieldName)
+	if refField == nil {
+		return nil, fmt.Errorf("reference field '%s' not found in model '%s'", refFieldName, targetModelName)
+	}
+
+	selectCols := b.buildSelectColumns(targetModel, nestedArgs)
+
+	// Always include the reference column for mapping
+	refCol := b.columnName(refField)
+	if !strings.Contains(selectCols, refCol) {
+		selectCols = refCol + ", " + selectCols
+	}
+
+	var placeholders []string
+	var sqlArgs []interface{}
+	for _, val := range parentFKValues {
+		placeholders = append(placeholders, b.placeholder())
+		sqlArgs = append(sqlArgs, val)
+	}
+
+	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s IN (%s)",
+		selectCols,
+		b.tableName(targetModel),
+		refCol,
+		strings.Join(placeholders, ", "),
+	)
+
+	// Additional WHERE
+	if where, ok := nestedArgs["where"]; ok {
+		whereClause, whereArgs, err := b.buildWhere(targetModel, where)
+		if err != nil {
+			return nil, err
+		}
+		if whereClause != "" {
+			sql += " AND " + whereClause
+			sqlArgs = append(sqlArgs, whereArgs...)
+		}
+	}
+
+	// ORDER BY
+	if orderBy, ok := nestedArgs["orderBy"]; ok {
+		orderClause := b.buildOrderBy(targetModel, orderBy)
+		if orderClause != "" {
+			sql += " ORDER BY " + orderClause
+		}
+	}
+
+	return &BuiltQuery{SQL: sql, Args: sqlArgs, Action: "relationQuery"}, nil
 }
 
 // ============================================================================

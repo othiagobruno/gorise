@@ -196,3 +196,123 @@ func (m *Model) GetRelationFields() []Field {
 	}
 	return result
 }
+
+// ============================================================================
+// Relation info helpers
+// ============================================================================
+
+// RelationDirection indicates how two models are related.
+type RelationDirection int
+
+const (
+	// RelationBelongsTo — this model holds the FK (e.g., Post.authorId → User.id).
+	RelationBelongsTo RelationDirection = iota
+	// RelationHasOne — the other model holds the FK, single result.
+	RelationHasOne
+	// RelationHasMany — the other model holds the FK, multiple results.
+	RelationHasMany
+)
+
+// RelationInfo describes a resolved relation between two models.
+type RelationInfo struct {
+	FieldName   string            // Field name on the source model (e.g., "posts", "author")
+	TargetModel string            // Target model name (e.g., "Post", "User")
+	FKFields    []string          // Foreign key field names on the FK-holding model
+	RefFields   []string          // Referenced field names on the referenced model
+	IsList      bool              // Whether this is a list relation
+	Direction   RelationDirection // BelongsTo, HasOne, or HasMany
+}
+
+// GetRelationInfo resolves relation metadata for a relation field.
+//
+// Why this complexity? In Prisma-style schemas, the @relation attribute with
+// fields/references only appears on ONE side of the relation (the FK-holding side).
+// The other side is a "virtual" back-reference. We need to handle both directions.
+func (m *Model) GetRelationInfo(fieldName string, schema *Schema) *RelationInfo {
+	field := m.GetFieldByName(fieldName)
+	if field == nil || !field.Type.IsModel {
+		return nil
+	}
+
+	targetModel := schema.GetModelByName(field.Type.Name)
+	if targetModel == nil {
+		return nil
+	}
+
+	info := &RelationInfo{
+		FieldName:   fieldName,
+		TargetModel: field.Type.Name,
+		IsList:      field.IsList,
+	}
+
+	// Case 1: This field has @relation(fields: [...], references: [...])
+	// → BelongsTo direction (this model holds the FK)
+	relAttr := field.GetRelationAttribute()
+	if relAttr != nil {
+		if fieldsArg, ok := relAttr.Args["fields"]; ok {
+			if refsArg, ok := relAttr.Args["references"]; ok {
+				info.FKFields = toStringSliceAST(fieldsArg)
+				info.RefFields = toStringSliceAST(refsArg)
+				info.Direction = RelationBelongsTo
+				return info
+			}
+		}
+	}
+
+	// Case 2: The opposite side holds the FK — look for a field on the target
+	// model whose @relation(fields: ..., references: ...) points back to us.
+	for _, targetField := range targetModel.Fields {
+		if !targetField.Type.IsModel || targetField.Type.Name != m.Name {
+			continue
+		}
+		tRelAttr := targetField.GetRelationAttribute()
+		if tRelAttr == nil {
+			continue
+		}
+		fieldsArg, hasFields := tRelAttr.Args["fields"]
+		refsArg, hasRefs := tRelAttr.Args["references"]
+		if !hasFields || !hasRefs {
+			continue
+		}
+
+		// The target model's FK fields → our referenced fields
+		info.FKFields = toStringSliceAST(fieldsArg)   // FK columns on target table
+		info.RefFields = toStringSliceAST(refsArg)     // PK/unique columns on source table
+
+		if field.IsList {
+			info.Direction = RelationHasMany
+		} else {
+			info.Direction = RelationHasOne
+		}
+		return info
+	}
+
+	return nil
+}
+
+// GetModelByName finds a model by name in the schema.
+func (s *Schema) GetModelByName(name string) *Model {
+	for i := range s.Models {
+		if s.Models[i].Name == name {
+			return &s.Models[i]
+		}
+	}
+	return nil
+}
+
+// toStringSliceAST converts an interface{} to a string slice (for attribute args).
+func toStringSliceAST(v interface{}) []string {
+	if list, ok := v.([]interface{}); ok {
+		var result []string
+		for _, item := range list {
+			if s, ok := item.(string); ok {
+				result = append(result, s)
+			}
+		}
+		return result
+	}
+	if s, ok := v.(string); ok {
+		return []string{s}
+	}
+	return nil
+}

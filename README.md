@@ -37,16 +37,17 @@ Practor brings together the **developer experience of Prisma** with the **raw sp
 
 ## ✨ Features
 
-| Feature                      | Description                                                     |
-| ---------------------------- | --------------------------------------------------------------- |
-| 🚀 **Go Query Engine**       | Compiled binary for maximum throughput and low-latency queries  |
-| 🔒 **Type-safe Client**      | Full TypeScript generation from your `.practor` schema          |
-| 🔄 **Prisma-compatible API** | Familiar `findMany`, `create`, `update`, `delete`, `upsert`     |
-| 💳 **Transactions**          | Interactive callbacks and batch transaction support             |
-| 📄 **Pagination**            | Built-in `paginate()` with metadata (`total`, `has_next`, etc.) |
-| 📡 **JSON-RPC IPC**          | Clean process isolation via stdin/stdout communication          |
-| 🛠 **CLI Tooling**           | Schema validation, code generation, DB push, and migrations     |
-| 🧩 **PSL Schema**            | Prisma Schema Language compatible syntax                        |
+| Feature                      | Description                                                    |
+| ---------------------------- | -------------------------------------------------------------- |
+| 🚀 **Go Query Engine**       | Compiled binary for maximum throughput and low-latency queries |
+| 🔒 **Type-safe Client**      | Full TypeScript generation from your `.practor` schema         |
+| 🔄 **Prisma-compatible API** | Familiar `findMany`, `create`, `update`, `delete`, `upsert`    |
+| 💳 **Transactions**          | Interactive callbacks and batch transaction support            |
+| 📄 **Pagination**            | Offset-based `paginate()` and cursor-based `cursorPaginate()`  |
+| 🔗 **Connection Pooling**    | Configurable pool with runtime stats via `$pool()`             |
+| 📡 **JSON-RPC IPC**          | Clean process isolation via stdin/stdout communication         |
+| 🛠 **CLI Tooling**           | Schema validation, code generation, DB push, and migrations    |
+| 🧩 **PSL Schema**            | Prisma Schema Language compatible syntax                       |
 
 ---
 
@@ -241,6 +242,33 @@ const result = await practor.user.paginate({
 // result.has_next → boolean
 ```
 
+### Cursor-Based Pagination
+
+For large datasets and real-time feeds, use `cursorPaginate()` — it avoids the skip-scan problem and stays consistent under concurrent writes.
+
+```typescript
+// First page (no cursor needed)
+const page1 = await practor.user.cursorPaginate({
+  take: 20,
+  orderBy: { id: "asc" },
+  where: { active: true },
+});
+
+// Next page — pass the cursor from the previous result
+const page2 = await practor.user.cursorPaginate({
+  cursor: { id: page1.nextCursor },
+  take: 20,
+  orderBy: { id: "asc" },
+  where: { active: true },
+});
+
+// page2.data        → User[]
+// page2.nextCursor  → value | null (null = last page)
+// page2.hasNextPage → boolean
+```
+
+> **How it works:** The engine uses `WHERE id > $cursor LIMIT take+1` — the extra row detects `hasNextPage` without a separate `COUNT(*)` query.
+
 ### Raw SQL
 
 ```typescript
@@ -252,38 +280,184 @@ const count =
   await practor.$executeRaw`DELETE FROM "user" WHERE active = ${false}`;
 ```
 
+### Middleware / Hooks (`$use`)
+
+Practor supports Prisma-compatible middleware that intercepts all model operations. Middleware runs in FIFO order and can inspect/mutate both params and results.
+
+```typescript
+// Logging middleware
+practor.$use(async (params, next) => {
+  const start = Date.now();
+  console.log(`Query: ${params.model}.${params.action}`);
+  const result = await next(params);
+  console.log(`Completed in ${Date.now() - start}ms`);
+  return result;
+});
+```
+
+```typescript
+// Soft-delete middleware
+practor.$use(async (params, next) => {
+  if (params.action === "delete") {
+    params.action = "update";
+    params.args = { ...params.args, data: { deletedAt: new Date() } };
+  }
+  if (params.action === "findMany" || params.action === "findFirst") {
+    params.args.where = { ...params.args.where, deletedAt: null };
+  }
+  return next(params);
+});
+```
+
+```typescript
+// Access control middleware
+practor.$use(async (params, next) => {
+  if (params.model === "Post" && params.action === "delete") {
+    throw new Error("Deleting posts is not allowed");
+  }
+  return next(params);
+});
+```
+
+> Middleware also runs inside `$transaction` — both interactive and batch modes.
+
+### Relation Queries (`include` & `select`)
+
+Eager-load related models with `include` or pick specific fields with `select`. The Go engine uses batched `WHERE IN` queries to avoid N+1 performance issues.
+
+#### Include — Eager Loading
+
+```typescript
+// Simple: load all related posts and profile
+const users = await practor.user.findMany({
+  include: { posts: true, profile: true },
+});
+// users[0].posts → Post[]
+// users[0].profile → Profile | null
+```
+
+```typescript
+// Nested: filter, sort, and limit included relations
+const users = await practor.user.findMany({
+  include: {
+    posts: {
+      where: { published: true },
+      orderBy: { createdAt: "desc" },
+      take: 5,
+    },
+  },
+});
+```
+
+```typescript
+// Deep nesting: include relations of relations
+const users = await practor.user.findMany({
+  include: {
+    posts: {
+      include: { categories: true },
+    },
+  },
+});
+```
+
+#### Select — Field Picking with Relations
+
+```typescript
+// Pick specific scalar fields + load relations
+const users = await practor.user.findMany({
+  select: {
+    name: true,
+    email: true,
+    posts: { select: { title: true, published: true } },
+  },
+});
+// users[0] → { name, email, posts: [{ title, published }] }
+```
+
+> **Note:** `select` and `include` are mutually exclusive at the same level — use one or the other.
+
+> **How it works:** After the main query, the engine collects all parent IDs and runs a single `SELECT ... WHERE fk IN ($1, $2, ...)` per relation, then groups and attaches results. Nested includes are resolved recursively.
+
+### Connection Pooling
+
+Practor uses a configurable connection pool managed by the Go engine. Customize pool behavior via client options or environment variables.
+
+```typescript
+const practor = new PractorClient({
+  datasourceUrl: process.env.DATABASE_URL,
+  pool: {
+    maxOpenConns: 50, // Max open connections (default: 20)
+    maxIdleConns: 10, // Max idle connections (default: 5)
+    connMaxLifetimeMs: 600_000, // Max connection lifetime (default: 5 min)
+    connMaxIdleTimeMs: 120_000, // Max idle time per connection (default: 1 min)
+  },
+});
+```
+
+Alternatively, configure via environment variables:
+
+```bash
+PRACTOR_POOL_MAX_OPEN_CONNS=50
+PRACTOR_POOL_MAX_IDLE_CONNS=10
+PRACTOR_POOL_CONN_MAX_LIFETIME_MS=600000
+PRACTOR_POOL_CONN_MAX_IDLE_TIME_MS=120000
+```
+
+#### Runtime Observability
+
+Monitor pool health in real time with `$pool()`:
+
+```typescript
+const stats = await practor.$pool();
+console.log(stats);
+// {
+//   maxOpenConnections: 50,
+//   openConnections: 12,
+//   inUse: 8,
+//   idle: 4,
+//   waitCount: 0,
+//   waitDurationMs: 0,
+//   maxIdleClosed: 3,
+//   maxIdleTimeClosed: 1,
+//   maxLifetimeClosed: 0
+// }
+```
+
 ### CLI Commands
 
-| Command               | Description                                            |
-| --------------------- | ------------------------------------------------------ |
-| `practor init`        | Initialize a new Practor project with a starter schema |
-| `practor generate`    | Generate the TypeScript client from `schema.practor`   |
-| `practor validate`    | Validate the schema file for syntax errors             |
-| `practor db push`     | Push schema changes directly to the database           |
-| `practor migrate dev` | Create and apply a new migration                       |
+| Command                  | Description                                            |
+| ------------------------ | ------------------------------------------------------ |
+| `practor init`           | Initialize a new Practor project with a starter schema |
+| `practor generate`       | Generate the TypeScript client from `schema.practor`   |
+| `practor validate`       | Validate the schema file for syntax errors             |
+| `practor db push`        | Push schema changes directly to the database           |
+| `practor migrate dev`    | Create and apply a new migration (development)         |
+| `practor migrate deploy` | Apply pending migrations in order (production/CI)      |
 
 ---
 
 ## 🏗 Architecture
 
 ```
+
 practor/
-├── engine/                    # Go Query Engine
-│   ├── cmd/practor/main.go     # Engine entrypoint & JSON-RPC server
-│   └── internal/
-│       ├── schema/            # PSL Parser
-│       ├── query/             # Query execution
-│       ├── connector/         # Database connectors
-│       ├── migration/         # Migration engine
-│       └── protocol/          # JSON-RPC communication bridge
+├── engine/ # Go Query Engine
+│ ├── cmd/practor/main.go # Engine entrypoint & JSON-RPC server
+│ └── internal/
+│ ├── schema/ # PSL Parser
+│ ├── query/ # Query execution
+│ ├── connector/ # Database connectors
+│ ├── migration/ # Migration engine
+│ └── protocol/ # JSON-RPC communication bridge
 ├── packages/
-│   ├── client/                # @practor/client — Runtime + API
-│   ├── generator/             # @practor/generator — Code generation
-│   └── cli/                   # @practor/cli — CLI tooling
-├── bin/                       # Compiled engine binary output
-├── schema.practor              # Example schema
-├── tsconfig.base.json         # Shared TypeScript config
-└── package.json               # Monorepo root (npm workspaces)
+│ ├── client/ # @practor/client — Runtime + API
+│ ├── generator/ # @practor/generator — Code generation
+│ └── cli/ # @practor/cli — CLI tooling
+├── bin/ # Compiled engine binary output
+├── schema.practor # Example schema
+├── tsconfig.base.json # Shared TypeScript config
+└── package.json # Monorepo root (npm workspaces)
+
 ```
 
 ---
@@ -455,11 +629,11 @@ Before submitting a PR, make sure:
 ## 🗺 Roadmap
 
 - [ ] MySQL and SQLite connector support
-- [ ] Cursor-based pagination
-- [ ] Relation queries (`include` and `select`)
-- [ ] Middleware / hooks (`$use`)
-- [ ] Connection pooling
-- [ ] `migrate deploy` for production
+- [x] Cursor-based pagination
+- [x] Relation queries (`include` and `select`)
+- [x] Middleware / hooks (`$use`)
+- [x] Connection pooling
+- [x] `migrate deploy` for production
 - [ ] Plugin system for custom generators
 - [ ] Dashboard UI for schema visualization
 

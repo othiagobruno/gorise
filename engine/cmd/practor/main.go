@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/practor/practor-engine/internal/connector"
@@ -43,6 +44,16 @@ func main() {
 
 	// Default: start JSON-RPC server mode
 	startServer()
+}
+
+// envInt reads an integer from an environment variable, returning 0 if unset or invalid.
+func envInt(key string) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
 }
 
 func startServer() {
@@ -91,10 +102,19 @@ func startServer() {
 		parsedSchema = &schema.Schema{}
 	}
 
+	// Build connection pool configuration from PRACTOR_POOL_* env vars.
+	// Zero-values are fine — PoolConfig.Apply() uses sensible defaults.
+	poolCfg := connector.PoolConfig{
+		MaxOpenConns:      envInt("PRACTOR_POOL_MAX_OPEN_CONNS"),
+		MaxIdleConns:      envInt("PRACTOR_POOL_MAX_IDLE_CONNS"),
+		ConnMaxLifetimeMs: envInt("PRACTOR_POOL_CONN_MAX_LIFETIME_MS"),
+		ConnMaxIdleTimeMs: envInt("PRACTOR_POOL_CONN_MAX_IDLE_TIME_MS"),
+	}
+
 	// Create connector
 	var conn connector.Connector
 	if dsn != "" {
-		pgConn := connector.NewPostgresConnector(dsn)
+		pgConn := connector.NewPostgresConnector(dsn, poolCfg)
 		if err := pgConn.Connect(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "Database connection error: %v\n", err)
 			// Don't exit — engine can still parse schemas without DB

@@ -152,13 +152,19 @@ export function generate(schema: Schema, outputDir: string): void {
   lines.push(" */");
   lines.push("");
   lines.push(
-    "import { PractorClient as BasePractorClient, PractorClientOptions } from '@practor/client';",
+    "import { PractorClient as BasePractorClient, PractorClientOptions, MiddlewareFunction } from '@practor/client';",
   );
   lines.push("");
 
   // JSON value type
   lines.push(
     "export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };",
+  );
+  lines.push("");
+
+  // Re-export middleware types for convenience
+  lines.push(
+    "export type { MiddlewareParams, MiddlewareNext, MiddlewareFunction } from '@practor/client';",
   );
   lines.push("");
 
@@ -377,7 +383,27 @@ function generateSelectInput(model: Model): string[] {
 
   for (const field of model.fields) {
     if (field.type.isModel) {
-      lines.push(`  ${field.name}?: boolean | ${field.type.name}FindManyArgs;`);
+      if (field.isList) {
+        // List relations support nested filtering, ordering, pagination
+        lines.push(`  ${field.name}?: boolean | {`);
+        lines.push(`    select?: ${field.type.name}Select;`);
+        lines.push(`    include?: ${field.type.name}Include;`);
+        lines.push(`    where?: ${field.type.name}WhereInput;`);
+        lines.push(
+          `    orderBy?: ${field.type.name}OrderByInput | ${field.type.name}OrderByInput[];`,
+        );
+        lines.push(`    take?: number;`);
+        lines.push(`    skip?: number;`);
+        lines.push(`    cursor?: ${field.type.name}WhereUniqueInput;`);
+        lines.push(`    distinct?: string[];`);
+        lines.push(`  };`);
+      } else {
+        // Single relations support select and include
+        lines.push(`  ${field.name}?: boolean | {`);
+        lines.push(`    select?: ${field.type.name}Select;`);
+        lines.push(`    include?: ${field.type.name}Include;`);
+        lines.push(`  };`);
+      }
     } else {
       lines.push(`  ${field.name}?: boolean;`);
     }
@@ -391,18 +417,37 @@ function generateIncludeInput(model: Model): string[] {
   const lines: string[] = [];
   lines.push(`export interface ${model.name}Include {`);
 
+  const hasRelations = model.fields.some((f) => f.type.isModel);
+
   for (const field of model.fields) {
     if (field.type.isModel) {
       if (field.isList) {
+        // List relations: boolean or nested query args
+        lines.push(`  ${field.name}?: boolean | {`);
+        lines.push(`    select?: ${field.type.name}Select;`);
+        lines.push(`    include?: ${field.type.name}Include;`);
+        lines.push(`    where?: ${field.type.name}WhereInput;`);
         lines.push(
-          `  ${field.name}?: boolean | ${field.type.name}FindManyArgs;`,
+          `    orderBy?: ${field.type.name}OrderByInput | ${field.type.name}OrderByInput[];`,
         );
+        lines.push(`    take?: number;`);
+        lines.push(`    skip?: number;`);
+        lines.push(`    cursor?: ${field.type.name}WhereUniqueInput;`);
+        lines.push(`    distinct?: string[];`);
+        lines.push(`  };`);
       } else {
-        lines.push(
-          `  ${field.name}?: boolean | ${field.type.name}FindUniqueArgs;`,
-        );
+        // Single relations: boolean or nested select/include
+        lines.push(`  ${field.name}?: boolean | {`);
+        lines.push(`    select?: ${field.type.name}Select;`);
+        lines.push(`    include?: ${field.type.name}Include;`);
+        lines.push(`  };`);
       }
     }
+  }
+
+  // If no relations, add index signature to prevent empty interface errors
+  if (!hasRelations) {
+    lines.push(`  _count?: boolean;`);
   }
 
   lines.push("}");

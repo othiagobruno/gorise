@@ -3,6 +3,7 @@ package connector
 import (
 	"context"
 	"database/sql"
+	"time"
 )
 
 // ============================================================================
@@ -18,6 +19,64 @@ const (
 	DialectSQLite    Dialect = "sqlite"
 	DialectSQLServer Dialect = "sqlserver"
 )
+
+// PoolConfig holds configurable connection pool parameters.
+// Zero-values fall back to sensible defaults inside each connector.
+type PoolConfig struct {
+	// MaxOpenConns is the maximum number of open connections to the database.
+	// Default: 20
+	MaxOpenConns int `json:"maxOpenConns,omitempty"`
+
+	// MaxIdleConns is the maximum number of idle connections in the pool.
+	// Default: 5
+	MaxIdleConns int `json:"maxIdleConns,omitempty"`
+
+	// ConnMaxLifetimeMs is the maximum lifetime of a connection in milliseconds.
+	// Default: 300000 (5 minutes)
+	ConnMaxLifetimeMs int `json:"connMaxLifetimeMs,omitempty"`
+
+	// ConnMaxIdleTimeMs is the maximum idle time of a connection in milliseconds.
+	// Default: 60000 (1 minute)
+	ConnMaxIdleTimeMs int `json:"connMaxIdleTimeMs,omitempty"`
+}
+
+// Apply sets pool parameters on *sql.DB using sensible defaults for zero-values.
+func (pc PoolConfig) Apply(db *sql.DB) {
+	maxOpen := pc.MaxOpenConns
+	if maxOpen <= 0 {
+		maxOpen = 20
+	}
+	maxIdle := pc.MaxIdleConns
+	if maxIdle <= 0 {
+		maxIdle = 5
+	}
+	maxLifetime := pc.ConnMaxLifetimeMs
+	if maxLifetime <= 0 {
+		maxLifetime = 300_000 // 5 minutes
+	}
+	maxIdleTime := pc.ConnMaxIdleTimeMs
+	if maxIdleTime <= 0 {
+		maxIdleTime = 60_000 // 1 minute
+	}
+
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(time.Duration(maxLifetime) * time.Millisecond)
+	db.SetConnMaxIdleTime(time.Duration(maxIdleTime) * time.Millisecond)
+}
+
+// PoolStats represents runtime statistics of the connection pool.
+type PoolStats struct {
+	MaxOpenConnections int `json:"maxOpenConnections"`
+	OpenConnections    int `json:"openConnections"`
+	InUse              int `json:"inUse"`
+	Idle               int `json:"idle"`
+	WaitCount          int `json:"waitCount"`
+	WaitDurationMs     int `json:"waitDurationMs"`
+	MaxIdleClosed      int `json:"maxIdleClosed"`
+	MaxIdleTimeClosed  int `json:"maxIdleTimeClosed"`
+	MaxLifetimeClosed  int `json:"maxLifetimeClosed"`
+}
 
 // Connector defines the interface for database connections.
 type Connector interface {
@@ -47,6 +106,9 @@ type Connector interface {
 
 	// BeginTx starts a new transaction.
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+
+	// GetPoolStats returns runtime statistics of the connection pool.
+	GetPoolStats() *PoolStats
 }
 
 // QueryResult represents the result of a database query as a list of rows.

@@ -3,6 +3,9 @@ package migration
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +22,7 @@ import (
 type Engine struct {
 	connector    connector.Connector
 	queryBuilder *query.Builder
+	schema       *schema.Schema
 }
 
 // NewEngine creates a new migration Engine.
@@ -26,6 +30,7 @@ func NewEngine(conn connector.Connector, s *schema.Schema) *Engine {
 	return &Engine{
 		connector:    conn,
 		queryBuilder: query.NewBuilder(string(conn.GetDialect()), s),
+		schema:       s,
 	}
 }
 
@@ -41,6 +46,21 @@ type Migration struct {
 type MigrationStatus struct {
 	Applied []Migration `json:"applied"`
 	Pending []Migration `json:"pending"`
+}
+
+// DeployResult represents the result of a deploy operation.
+type DeployResult struct {
+	Applied []string `json:"applied"`
+	Count   int      `json:"count"`
+	Message string   `json:"message"`
+}
+
+// DevMigrationResult represents the result of creating a dev migration.
+type DevMigrationResult struct {
+	MigrationID string `json:"migrationId"`
+	SQL         string `json:"sql"`
+	FilePath    string `json:"filePath"`
+	Message     string `json:"message"`
 }
 
 // ============================================================================
@@ -60,6 +80,225 @@ CREATE TABLE IF NOT EXISTS "_practor_migrations" (
 func (e *Engine) EnsureMigrationsTable(ctx context.Context) error {
 	_, err := e.connector.Execute(ctx, migrationsTableSQL)
 	return err
+}
+
+// ============================================================================
+// Applied migration tracking
+// ============================================================================
+
+// GetAppliedMigrations returns a list of migration IDs already applied to the database.
+func (e *Engine) GetAppliedMigrations(ctx context.Context) ([]string, error) {
+	rows, err := e.connector.Query(ctx, `SELECT "id" FROM "_practor_migrations" ORDER BY "applied_at" ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query applied migrations: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan migration row: %w", err)
+		}
+		ids = append(ids, id)
+	}
+
+	return ids, rows.Err()
+}
+
+// RecordMigration inserts a migration record into the tracking table.
+func (e *Engine) RecordMigration(ctx context.Context, id, name, sqlContent string) error {
+	_, err := e.connector.Execute(ctx,
+		`INSERT INTO "_practor_migrations" ("id", "name", "sql_content") VALUES ($1, $2, $3)`,
+		id, name, sqlContent,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to record migration '%s': %w", id, err)
+	}
+	return nil
+}
+
+// ============================================================================
+// Deploy — Apply pending migrations from disk (production)
+// ============================================================================
+
+// Deploy reads migration files from migrationsDir, determines which are pending,
+// and applies them sequentially. Each migration runs inside a transaction.
+// This is the production-safe command — it never creates new migration files.
+func (e *Engine) Deploy(ctx context.Context, migrationsDir string) (*DeployResult, error) {
+	// Ensure tracking table exists
+	if err := e.EnsureMigrationsTable(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure migrations table: %w", err)
+	}
+
+	// Get already-applied migrations
+	applied, err := e.GetAppliedMigrations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	appliedSet := make(map[string]bool, len(applied))
+	for _, id := range applied {
+		appliedSet[id] = true
+	}
+
+	// Discover migration directories on disk
+	migrationDirs, err := discoverMigrations(migrationsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(migrationDirs) == 0 {
+		return &DeployResult{
+			Applied: []string{},
+			Count:   0,
+			Message: "No migration files found",
+		}, nil
+	}
+
+	// Apply each pending migration
+	var appliedMigrations []string
+	for _, migDir := range migrationDirs {
+		migID := filepath.Base(migDir)
+
+		if appliedSet[migID] {
+			continue // Already applied
+		}
+
+		sqlPath := filepath.Join(migDir, "migration.sql")
+		sqlBytes, err := os.ReadFile(sqlPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read migration '%s': %w", migID, err)
+		}
+
+		sqlContent := string(sqlBytes)
+		if strings.TrimSpace(sqlContent) == "" {
+			continue // Skip empty migrations
+		}
+
+		// Extract human-readable name from dir name (strip timestamp prefix)
+		name := extractMigrationName(migID)
+
+		// Apply inside a transaction
+		tx, err := e.connector.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to begin transaction for migration '%s': %w", migID, err)
+		}
+
+		if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
+			tx.Rollback()
+			return nil, fmt.Errorf("failed to apply migration '%s': %w", migID, err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("failed to commit migration '%s': %w", migID, err)
+		}
+
+		// Record in tracking table (outside the migration tx to avoid schema conflicts)
+		if err := e.RecordMigration(ctx, migID, name, sqlContent); err != nil {
+			return nil, err
+		}
+
+		appliedMigrations = append(appliedMigrations, migID)
+	}
+
+	if len(appliedMigrations) == 0 {
+		return &DeployResult{
+			Applied: []string{},
+			Count:   0,
+			Message: "Database is already up to date",
+		}, nil
+	}
+
+	return &DeployResult{
+		Applied: appliedMigrations,
+		Count:   len(appliedMigrations),
+		Message: fmt.Sprintf("Applied %d migration(s) successfully", len(appliedMigrations)),
+	}, nil
+}
+
+// ============================================================================
+// Dev Migration — Generate and apply a new migration (development)
+// ============================================================================
+
+// CreateDevMigration generates a new migration SQL file from the current schema,
+// writes it to disk, and applies it. This is the development workflow command.
+func (e *Engine) CreateDevMigration(ctx context.Context, migrationsDir, name, schemaPath string) (*DevMigrationResult, error) {
+	// Read and parse the schema
+	data, err := os.ReadFile(schemaPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read schema: %w", err)
+	}
+
+	parsed, err := schema.Parse(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("schema parse error: %w", err)
+	}
+	schema.ResolveFieldTypes(parsed)
+
+	// Ensure tracking table exists
+	if err := e.EnsureMigrationsTable(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ensure migrations table: %w", err)
+	}
+
+	// Generate SQL for the full schema (enums first, then tables)
+	dialect := string(e.connector.GetDialect())
+	var statements []string
+
+	builder := query.NewBuilder(dialect, parsed)
+	for i := range parsed.Enums {
+		statements = append(statements, builder.BuildCreateEnum(&parsed.Enums[i]))
+	}
+	for i := range parsed.Models {
+		statements = append(statements, builder.BuildCreateTable(&parsed.Models[i]))
+	}
+
+	sqlContent := strings.Join(statements, "\n\n") + "\n"
+
+	// Generate migration ID (timestamp + name)
+	timestamp := time.Now().Format("20060102150405")
+	safeName := sanitizeMigrationName(name)
+	if safeName == "" {
+		safeName = "migration"
+	}
+	migrationID := fmt.Sprintf("%s_%s", timestamp, safeName)
+
+	// Create migration directory and file
+	migDir := filepath.Join(migrationsDir, migrationID)
+	if err := os.MkdirAll(migDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create migration directory: %w", err)
+	}
+
+	sqlPath := filepath.Join(migDir, "migration.sql")
+	if err := os.WriteFile(sqlPath, []byte(sqlContent), 0644); err != nil {
+		return nil, fmt.Errorf("failed to write migration file: %w", err)
+	}
+
+	// Apply the migration
+	tx, err := e.connector.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, sqlContent); err != nil {
+		tx.Rollback()
+		return nil, fmt.Errorf("failed to apply migration: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("failed to commit migration: %w", err)
+	}
+
+	// Record migration
+	if err := e.RecordMigration(ctx, migrationID, safeName, sqlContent); err != nil {
+		return nil, err
+	}
+
+	return &DevMigrationResult{
+		MigrationID: migrationID,
+		SQL:         sqlContent,
+		FilePath:    sqlPath,
+		Message:     fmt.Sprintf("Migration '%s' created and applied successfully", migrationID),
+	}, nil
 }
 
 // ============================================================================
@@ -264,6 +503,64 @@ func GenerateMigrationSQL(diffs []Diff, s *schema.Schema, dialect string) string
 	}
 
 	return strings.Join(statements, ";\n\n") + ";"
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+// discoverMigrations scans the migrations directory and returns sorted migration
+// directory paths. Each migration dir is expected to contain a migration.sql file.
+func discoverMigrations(migrationsDir string) ([]string, error) {
+	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
+		return nil, nil // No migrations directory yet
+	}
+
+	entries, err := os.ReadDir(migrationsDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read migrations directory: %w", err)
+	}
+
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		sqlPath := filepath.Join(migrationsDir, entry.Name(), "migration.sql")
+		if _, err := os.Stat(sqlPath); err == nil {
+			dirs = append(dirs, filepath.Join(migrationsDir, entry.Name()))
+		}
+	}
+
+	// Sort by directory name (timestamp prefix ensures chronological order)
+	sort.Strings(dirs)
+	return dirs, nil
+}
+
+// extractMigrationName extracts the human-readable name from a migration ID.
+// E.g., "20260308120000_add_users" -> "add_users"
+func extractMigrationName(migID string) string {
+	parts := strings.SplitN(migID, "_", 2)
+	if len(parts) == 2 {
+		return parts[1]
+	}
+	return migID
+}
+
+// sanitizeMigrationName converts a name into a safe directory-name fragment.
+func sanitizeMigrationName(name string) string {
+	name = strings.TrimSpace(name)
+	name = strings.ToLower(name)
+	// Replace spaces and special chars with underscores
+	var result strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' {
+			result.WriteRune(r)
+		} else if r == ' ' || r == '-' {
+			result.WriteRune('_')
+		}
+	}
+	return result.String()
 }
 
 func toSnakeCase(s string) string {

@@ -49,11 +49,14 @@ func NewEngineHandler(
 	server.RegisterHandler("db.executeRaw", h.handleExecuteRaw)
 	server.RegisterHandler("db.queryRaw", h.handleQueryRaw)
 	server.RegisterHandler("migrate.status", h.handleMigrateStatus)
+	server.RegisterHandler("migrate.deploy", h.handleMigrateDeploy)
+	server.RegisterHandler("migrate.dev", h.handleMigrateDev)
 	server.RegisterHandler("transaction.begin", h.handleTransactionBegin)
 	server.RegisterHandler("transaction.commit", h.handleTransactionCommit)
 	server.RegisterHandler("transaction.rollback", h.handleTransactionRollback)
 	server.RegisterHandler("transaction.query", h.handleTransactionQuery)
 	server.RegisterHandler("transaction.mutation", h.handleTransactionMutation)
+	server.RegisterHandler("pool.getStats", h.handlePoolGetStats)
 	server.RegisterHandler("ping", h.handlePing)
 	server.RegisterHandler("shutdown", h.handleShutdown)
 
@@ -228,6 +231,43 @@ func (h *EngineHandler) handleMigrateStatus(ctx context.Context, params json.Raw
 	return map[string]string{"status": "ok"}, nil
 }
 
+func (h *EngineHandler) handleMigrateDeploy(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	var p MigrateDeployParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid migrate deploy params: %w", err)
+	}
+
+	result, err := h.migEngine.Deploy(ctx, p.MigrationsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MigrateDeployResponse{
+		Applied: result.Applied,
+		Count:   result.Count,
+		Message: result.Message,
+	}, nil
+}
+
+func (h *EngineHandler) handleMigrateDev(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	var p MigrateDevParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return nil, fmt.Errorf("invalid migrate dev params: %w", err)
+	}
+
+	result, err := h.migEngine.CreateDevMigration(ctx, p.MigrationsDir, p.Name, p.SchemaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &MigrateDevResponse{
+		MigrationID: result.MigrationID,
+		SQL:         result.SQL,
+		FilePath:    result.FilePath,
+		Message:     result.Message,
+	}, nil
+}
+
 // ============================================================================
 // Transaction handlers
 // ============================================================================
@@ -298,6 +338,15 @@ func (h *EngineHandler) handleTransactionMutation(ctx context.Context, params js
 	}
 
 	return &MutationResponse{Data: result}, nil
+}
+
+// ============================================================================
+// Pool handlers
+// ============================================================================
+
+// handlePoolGetStats returns runtime connection pool statistics.
+func (h *EngineHandler) handlePoolGetStats(ctx context.Context, params json.RawMessage) (interface{}, error) {
+	return h.conn.GetPoolStats(), nil
 }
 
 // ============================================================================

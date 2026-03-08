@@ -12,13 +12,14 @@ npx @practor/cli init
 
 ## Commands
 
-| Command               | Description                                |
-| --------------------- | ------------------------------------------ |
-| `practor init`        | Initialize a new Practor project           |
-| `practor generate`    | Generate the TypeScript client from schema |
-| `practor validate`    | Validate the schema file                   |
-| `practor db push`     | Push schema changes to the database        |
-| `practor migrate dev` | Create and apply a migration               |
+| Command                  | Description                                |
+| ------------------------ | ------------------------------------------ |
+| `practor init`           | Initialize a new Practor project           |
+| `practor generate`       | Generate the TypeScript client from schema |
+| `practor validate`       | Validate the schema file                   |
+| `practor db push`        | Push schema changes to the database        |
+| `practor migrate dev`    | Create and apply a migration               |
+| `practor migrate deploy` | Apply pending migrations (production)      |
 
 ## Quick Start
 
