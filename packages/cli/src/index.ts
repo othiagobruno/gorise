@@ -28,10 +28,23 @@ function resolveEnginePath(): string {
   const envPath = process.env.PRACTOR_ENGINE_PATH;
   if (envPath && fs.existsSync(envPath)) return envPath;
 
+  const platform = process.platform;
+  const arch = process.arch;
+  const isWindows = platform === "win32";
+  const binaryName = isWindows ? "practor-engine.exe" : "practor-engine";
+  const packageName = `@practor/engine-${platform}-${arch}`;
+
+  try {
+    const packageDir = path.dirname(require.resolve(`${packageName}/package.json`));
+    return path.join(packageDir, "bin", binaryName);
+  } catch {
+    // Package not installed — fall through to local fallbacks
+  }
+
   const paths = [
-    path.resolve(process.cwd(), "bin", "practor-engine"),
-    path.resolve(process.cwd(), "node_modules", ".practor", "practor-engine"),
-    path.resolve(__dirname, "..", "..", "..", "bin", "practor-engine"),
+    path.resolve(process.cwd(), "bin", binaryName),
+    path.resolve(process.cwd(), "node_modules", ".practor", binaryName),
+    path.resolve(__dirname, "..", "..", "..", "bin", binaryName),
   ];
 
   for (const p of paths) {

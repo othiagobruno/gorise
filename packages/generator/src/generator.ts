@@ -206,6 +206,28 @@ export function generate(schema: Schema, outputDir: string): void {
   fs.writeFileSync(outputPath, lines.join("\n"), "utf-8");
 }
 
+function resolveEnginePath(): string {
+  const envPath = process.env.PRACTOR_ENGINE_PATH;
+  if (envPath) {
+    return envPath;
+  }
+
+  const platform = process.platform;
+  const arch = process.arch;
+  const isWindows = platform === "win32";
+  const binaryName = isWindows ? "practor-engine.exe" : "practor-engine";
+  const packageName = `@practor/engine-${platform}-${arch}`;
+
+  try {
+    const packageDir = path.dirname(require.resolve(`${packageName}/package.json`));
+    return path.join(packageDir, "bin", binaryName);
+  } catch {
+    // Package not installed — fall through to local development paths
+  }
+
+  return path.resolve(process.cwd(), "bin", binaryName);
+}
+
 // ============================================================================
 // Enum generation
 // ============================================================================
@@ -635,10 +657,7 @@ export async function generateFromSchema(
 ): Promise<void> {
   const { execFileSync } = await import("child_process");
 
-  // Use the Go engine to parse the schema
-  const enginePath =
-    process.env.PRACTOR_ENGINE_PATH ||
-    path.resolve(process.cwd(), "node_modules", ".practor", "practor-engine");
+  const enginePath = resolveEnginePath();
 
   let schemaJSON: string;
   try {
@@ -648,7 +667,11 @@ export async function generateFromSchema(
     });
   } catch (err: any) {
     // Fallback: try the engine from bin directory
-    const binPath = path.resolve(process.cwd(), "bin", "practor-engine");
+    const binPath = path.resolve(
+      process.cwd(),
+      "bin",
+      process.platform === "win32" ? "practor-engine.exe" : "practor-engine",
+    );
     schemaJSON = execFileSync(binPath, ["parse", schemaPath], {
       encoding: "utf-8",
       timeout: 10_000,

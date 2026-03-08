@@ -36,6 +36,13 @@
   "engines": {
     "node": ">=18.0.0"
   },
+  "optionalDependencies": {
+    "@practor/engine-darwin-x64": "0.3.0",
+    "@practor/engine-darwin-arm64": "0.3.0",
+    "@practor/engine-linux-x64": "0.3.0",
+    "@practor/engine-linux-arm64": "0.3.0",
+    "@practor/engine-win32-x64": "0.3.0"
+  },
   "dependencies": {},
   "devDependencies": {
     "typescript": "^5.4.0",
